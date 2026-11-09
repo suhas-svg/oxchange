@@ -1,0 +1,18 @@
+[package]
+name = "order-book"
+description = "Deterministic limit order book and matching logic. No I/O, no clock, no randomness."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+domain.workspace = true
+slab.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

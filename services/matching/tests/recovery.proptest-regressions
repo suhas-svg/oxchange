@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 2f6f2d4b5045e7af1b3afb86336284b7732264b6c87c3ef8921e65d51ad09a78 # shrinks to ops = [New { sym: 2, user: 0, buy: true, ioc: false, price: 98, qty: 1 }, New { sym: 0, user: 0, buy: false, ioc: false, price: 95, qty: 1 }, New { sym: 2, user: 0, buy: true, ioc: false, price: 98, qty: 1 }, New { sym: 0, user: 0, buy: false, ioc: false, price: 95, qty: 1 }, New { sym: 0, user: 0, buy: false, ioc: false, price: 95, qty: 1 }, New { sym: 2, user: 1, buy: false, ioc: false, price: 95, qty: 1 }], snap_at = Index(7905747460161236407), crash_at = Index(0)

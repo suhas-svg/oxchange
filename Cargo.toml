@@ -1,0 +1,36 @@
+[workspace]
+resolver = "3"
+members = ["crates/domain", "crates/order-book", "services/matching"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+
+[workspace.dependencies]
+domain = { path = "crates/domain" }
+order-book = { path = "crates/order-book" }
+uuid = { version = "1", features = ["v7"] }
+slab = "0.4"
+thiserror = "2"
+proptest = "1"
+crc32fast = "1"
+tempfile = "3"
+criterion = "0.7"
+hdrhistogram = "7"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+float_arithmetic = "deny"
+
+# Benchmarks measure what ships: full optimization, one codegen unit.
+[profile.bench]
+lto = "fat"
+codegen-units = 1
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
