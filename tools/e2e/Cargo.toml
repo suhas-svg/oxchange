@@ -1,0 +1,25 @@
+[package]
+name = "e2e"
+description = "End-to-end checks against a running Redpanda: produce a workload, verify matching.events."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+domain.workspace = true
+order-book.workspace = true
+matching.workspace = true
+rdkafka = { workspace = true, optional = true }
+
+[features]
+kafka = ["dep:rdkafka"]
+
+[[bin]]
+name = "e2e"
+path = "src/main.rs"
+required-features = ["kafka"]
+
+[lints]
+workspace = true

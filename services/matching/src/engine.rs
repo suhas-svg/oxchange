@@ -138,6 +138,18 @@ impl Engine {
         })
     }
 
+    /// Records that the input at `offset` was consumed without applying it
+    /// (it could not be decoded and went to the dead-letter queue). Returns
+    /// false if that offset was already behind the engine.
+    pub fn skip(&mut self, offset: u64) -> bool {
+        if offset < self.next_offset {
+            return false;
+        }
+        self.next_offset = offset + 1;
+        self.since_snapshot += 1;
+        true
+    }
+
     /// Commands read since the last snapshot was taken (or since start).
     pub fn commands_since_snapshot(&self) -> u64 {
         self.since_snapshot

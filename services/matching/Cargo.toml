@@ -14,6 +14,20 @@ prost.workspace = true
 crc32fast.workspace = true
 uuid.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
+
+# The Kafka adapters and the service binary. librdkafka is built from source,
+# which this project does in Docker; host builds leave the feature off.
+rdkafka = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
+ctrlc = { workspace = true, optional = true }
+
+[features]
+kafka = ["dep:rdkafka", "dep:tracing-subscriber", "dep:ctrlc"]
+
+[[bin]]
+name = "matching"
+required-features = ["kafka"]
 
 [dev-dependencies]
 proptest.workspace = true

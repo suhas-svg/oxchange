@@ -1,0 +1,35 @@
+[package]
+name = "order-entry"
+description = "Phase 1 stand-in order endpoint: validates orders and publishes them to orders.commands. Replaced by the Gateway and Risk."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+domain.workspace = true
+order-book.workspace = true
+matching.workspace = true
+axum.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+tracing.workspace = true
+
+rdkafka = { workspace = true, optional = true, features = ["tokio"] }
+tracing-subscriber = { workspace = true, optional = true }
+
+[features]
+kafka = ["dep:rdkafka", "dep:tracing-subscriber"]
+
+[[bin]]
+name = "order-entry"
+required-features = ["kafka"]
+
+[dev-dependencies]
+tower.workspace = true
+http-body-util.workspace = true
+
+[lints]
+workspace = true
