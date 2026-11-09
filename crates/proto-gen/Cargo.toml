@@ -1,0 +1,20 @@
+[package]
+name = "proto-gen"
+description = "Generated Protocol Buffers and gRPC code for every Oxchange contract in /proto."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+prost.workspace = true
+tonic.workspace = true
+tonic-prost.workspace = true
+
+[build-dependencies]
+# protox is a pure-Rust protobuf compiler, so building needs no protoc install.
+protox.workspace = true
+tonic-prost-build.workspace = true
+
+[lints]
+workspace = true

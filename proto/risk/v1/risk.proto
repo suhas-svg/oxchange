@@ -1,0 +1,107 @@
+// Risk service (spec: "Service specifications → Risk").
+//
+// Accepts orders, checks them, reserves funds, and tracks each order's
+// status. A successful PlaceOrder means "accepted for matching", not traded.
+syntax = "proto3";
+
+package risk.v1;
+
+import "events/v1/events.proto";
+
+service RiskService {
+  rpc PlaceOrder(PlaceOrderRequest) returns (PlaceOrderResponse);
+  rpc CancelOrder(CancelOrderRequest) returns (CancelOrderResponse);
+  rpc GetOrder(GetOrderRequest) returns (GetOrderResponse);
+  rpc ListOrders(ListOrdersRequest) returns (ListOrdersResponse);
+}
+
+enum OrderStatus {
+  ORDER_STATUS_UNSPECIFIED = 0;
+  ORDER_STATUS_PENDING_RISK = 1;
+  ORDER_STATUS_ACCEPTED = 2;
+  ORDER_STATUS_OPEN = 3;
+  ORDER_STATUS_PARTIALLY_FILLED = 4;
+  // Final states.
+  ORDER_STATUS_FILLED = 5;
+  ORDER_STATUS_CANCELED = 6;
+  ORDER_STATUS_REJECTED = 7;
+}
+
+message Order {
+  string order_id = 1;
+  string client_order_id = 2;
+  string user_id = 3;
+  string symbol = 4;
+  events.v1.Side side = 5;
+  events.v1.OrderType order_type = 6;
+  events.v1.TimeInForce time_in_force = 7;
+  // The limit price; for market orders, the protected price.
+  int64 limit_price_cents = 8;
+  int64 quantity = 9;
+  int64 filled_quantity = 10;
+  int64 canceled_quantity = 11;
+  OrderStatus status = 12;
+  // Set when status is REJECTED, for example "INSUFFICIENT_FUNDS" or
+  // "ACCOUNTS_UNAVAILABLE".
+  string reject_reason = 13;
+  int64 created_at_ns = 14;
+  int64 updated_at_ns = 15;
+}
+
+message PlaceOrderRequest {
+  // The verified user, from the Gateway; never from the client body.
+  string user_id = 1;
+  // Unique per user. Sending it again returns the original order.
+  string client_order_id = 2;
+  string symbol = 3;
+  events.v1.Side side = 4;
+  events.v1.OrderType order_type = 5;
+  events.v1.TimeInForce time_in_force = 6;
+  // Required for limit orders; ignored for market orders.
+  int64 price_cents = 7;
+  int64 quantity = 8;
+}
+
+message PlaceOrderResponse {
+  Order order = 1;
+  // True if client_order_id was already used and this is the original order
+  // (the Gateway answers 200 instead of 202).
+  bool existing = 2;
+}
+
+message CancelOrderRequest {
+  string user_id = 1;
+  string order_id = 2;
+}
+
+message CancelOrderResponse {
+  // The order as it stands; the cancel itself completes asynchronously.
+  Order order = 1;
+}
+
+message GetOrderRequest {
+  string user_id = 1;
+  string order_id = 2;
+}
+
+message GetOrderResponse {
+  Order order = 1;
+}
+
+message ListOrdersRequest {
+  string user_id = 1;
+  // Optional filter; empty means every stock.
+  string symbol = 2;
+  // True to list only orders that are not in a final state.
+  bool open_only = 3;
+  // Opaque cursor from the previous page; empty for the first page.
+  string cursor = 4;
+  // At most 100.
+  int32 page_size = 5;
+}
+
+message ListOrdersResponse {
+  repeated Order orders = 1;
+  // Empty when there are no more pages.
+  string next_cursor = 2;
+}

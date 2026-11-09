@@ -16,6 +16,7 @@
 //! replaying. If retention has already deleted it, replay would silently skip
 //! commands, so the engine must halt instead.
 
+pub mod codec;
 mod dedup;
 mod engine;
 pub mod snapshot;

@@ -1,0 +1,32 @@
+// Matching Engine gRPC (spec: "Service specifications → Matching Engine").
+//
+// Market Data calls GetBook at startup, then applies live matching.events
+// with seq above as_of_seq. The matcher answers between commands, so the
+// book is never seen mid-update.
+syntax = "proto3";
+
+package matching.v1;
+
+service MatchingService {
+  rpc GetBook(GetBookRequest) returns (GetBookResponse);
+}
+
+message GetBookRequest {
+  string symbol = 1;
+}
+
+message PriceLevel {
+  int64 price_cents = 1;
+  // Total resting quantity at this price.
+  int64 quantity = 2;
+}
+
+message GetBookResponse {
+  string symbol = 1;
+  // The seq of the last event already reflected in this book.
+  uint64 as_of_seq = 2;
+  // Best (highest) bid first.
+  repeated PriceLevel bids = 3;
+  // Best (lowest) ask first.
+  repeated PriceLevel asks = 4;
+}

@@ -9,6 +9,8 @@ license.workspace = true
 [dependencies]
 domain.workspace = true
 order-book.workspace = true
+proto-gen.workspace = true
+prost.workspace = true
 crc32fast.workspace = true
 uuid.workspace = true
 thiserror.workspace = true

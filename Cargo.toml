@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/domain", "crates/order-book", "services/matching"]
+members = ["crates/domain", "crates/order-book", "crates/proto-gen", "services/matching"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,6 +11,7 @@ license = "MIT"
 [workspace.dependencies]
 domain = { path = "crates/domain" }
 order-book = { path = "crates/order-book" }
+proto-gen = { path = "crates/proto-gen" }
 uuid = { version = "1", features = ["v7"] }
 slab = "0.4"
 thiserror = "2"
@@ -19,6 +20,11 @@ crc32fast = "1"
 tempfile = "3"
 criterion = "0.7"
 hdrhistogram = "7"
+prost = "0.14"
+tonic = "0.14"
+tonic-prost = "0.14"
+tonic-prost-build = "0.14"
+protox = "0.10"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
