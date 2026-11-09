@@ -1,0 +1,194 @@
+// Kafka message contracts (spec: "Messaging → Message contracts").
+//
+// Rules: add fields only, never reuse a field number, and let `buf breaking`
+// block unsafe changes in CI. Trace context travels in Kafka headers, not here.
+// Money is int64 cents and quantities are int64 shares; never floating point.
+syntax = "proto3";
+
+package events.v1;
+
+// ---------------------------------------------------------------- shared
+
+enum Side {
+  SIDE_UNSPECIFIED = 0;
+  SIDE_BUY = 1;
+  SIDE_SELL = 2;
+}
+
+enum OrderType {
+  ORDER_TYPE_UNSPECIFIED = 0;
+  ORDER_TYPE_LIMIT = 1;
+  // Runs as IOC at a protected price 5% from the reference price.
+  ORDER_TYPE_MARKET = 2;
+}
+
+enum TimeInForce {
+  TIME_IN_FORCE_UNSPECIFIED = 0;
+  // Good-till-canceled: the unfilled part waits in the book.
+  TIME_IN_FORCE_GTC = 1;
+  // Immediate-or-cancel: the unfilled part is canceled at once.
+  TIME_IN_FORCE_IOC = 2;
+}
+
+// ------------------------------------------------- orders.commands topic
+// Written by Risk, read by the Matching Engine. Key: stock symbol.
+
+message Command {
+  // Unique per command; the engine's duplicate memory drops repeats.
+  string command_id = 1;
+  string symbol = 2;
+  // When Risk accepted the command. The only time source the engine uses.
+  int64 accepted_at_ns = 3;
+  oneof body {
+    NewOrder new_order = 10;
+    CancelOrder cancel_order = 11;
+  }
+}
+
+message NewOrder {
+  // UUIDv7 created by Risk.
+  string order_id = 1;
+  string user_id = 2;
+  Side side = 3;
+  OrderType order_type = 4;
+  TimeInForce time_in_force = 5;
+  // The limit price; for market orders, the protected price Risk computed.
+  int64 price_cents = 6;
+  int64 quantity = 7;
+}
+
+message CancelOrder {
+  string order_id = 1;
+  string user_id = 2;
+}
+
+// ------------------------------------------------- matching.events topic
+// Written by the Matching Engine; read by Risk, Settlement, Market Data and
+// Notifications. Key: stock symbol. One stream and one seq counter per stock.
+
+message MatchingEvent {
+  // "{symbol}-{seq}". Detects duplicate events.
+  string event_id = 1;
+  string symbol = 2;
+  // Per stock, starts at 1, never has gaps. A jump means data is missing.
+  uint64 seq = 3;
+  // Copied from the command's accepted_at_ns.
+  int64 event_time_ns = 4;
+  // The command that caused this event.
+  string command_id = 5;
+  oneof body {
+    OrderAccepted order_accepted = 10;
+    TradeExecuted trade = 11;
+    OrderCanceled order_canceled = 12;
+    CancelRejected cancel_rejected = 13;
+    BookChanged book_changed = 14;
+  }
+}
+
+// The book took the order. Always the first event for a valid new order.
+message OrderAccepted {
+  string order_id = 1;
+  string user_id = 2;
+  Side side = 3;
+  int64 price_cents = 4;
+  int64 quantity = 5;
+}
+
+message TradeExecuted {
+  // "{symbol}-{seq}" of this trade event. Makes settlement safe to retry.
+  string trade_id = 1;
+  // Always the resting order's price.
+  int64 price_cents = 2;
+  int64 quantity = 3;
+  string buy_order_id = 4;
+  string sell_order_id = 5;
+  string buyer_id = 6;
+  string seller_id = 7;
+  // The side of the incoming order.
+  Side aggressor_side = 8;
+}
+
+enum CancelReason {
+  CANCEL_REASON_UNSPECIFIED = 0;
+  // The user asked for it.
+  CANCEL_REASON_USER = 1;
+  // IOC or market order: whatever did not trade at once.
+  CANCEL_REASON_IOC_REMAINDER = 2;
+  // The next match would have been against the same user's resting order.
+  CANCEL_REASON_SELF_TRADE = 3;
+  // Price or quantity out of range; the whole order was refused so its
+  // funds are released. Risk should never send one.
+  CANCEL_REASON_INVALID = 4;
+}
+
+// Some quantity of an order will never trade. Risk releases funds for
+// exactly canceled_quantity.
+message OrderCanceled {
+  string order_id = 1;
+  string user_id = 2;
+  int64 canceled_quantity = 3;
+  CancelReason reason = 4;
+}
+
+enum CancelRejectReason {
+  CANCEL_REJECT_REASON_UNSPECIFIED = 0;
+  // Not in the book: already filled, already canceled, or never rested.
+  CANCEL_REJECT_REASON_NOT_FOUND = 1;
+  // The order belongs to a different user.
+  CANCEL_REJECT_REASON_NOT_OWNER = 2;
+}
+
+message CancelRejected {
+  string order_id = 1;
+  string user_id = 2;
+  CancelRejectReason reason = 3;
+}
+
+// The total resting quantity at one price changed.
+message BookChanged {
+  Side side = 1;
+  int64 price_cents = 2;
+  // 0 means the price level is gone.
+  int64 new_total_quantity = 3;
+}
+
+// ----------------------------------------------- settlement.events topic
+// Written by Settlement, read by Notifications. Key: trade ID.
+
+message TradeSettled {
+  string trade_id = 1;
+  string symbol = 2;
+  int64 price_cents = 3;
+  int64 quantity = 4;
+  string buy_order_id = 5;
+  string sell_order_id = 6;
+  string buyer_id = 7;
+  string seller_id = 8;
+  int64 settled_at_ns = 9;
+}
+
+// ------------------------------------------------- accounts.events topic
+// Written by Accounts, read by Notifications. Key: user ID.
+
+message AccountEvent {
+  // Unique per event; Notifications stores (event_id, user_id) once.
+  string event_id = 1;
+  string user_id = 2;
+  int64 event_time_ns = 3;
+  oneof body {
+    Deposited deposited = 10;
+    Withdrawn withdrawn = 11;
+  }
+}
+
+message Deposited {
+  int64 amount_cents = 1;
+  // Available USD balance after the deposit.
+  int64 balance_cents = 2;
+}
+
+message Withdrawn {
+  int64 amount_cents = 1;
+  // Available USD balance after the withdrawal.
+  int64 balance_cents = 2;
+}

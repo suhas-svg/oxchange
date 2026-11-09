@@ -1,0 +1,197 @@
+// Accounts service (spec: "Service specifications → Accounts").
+//
+// The single source of truth for balances. Every write takes an idempotency
+// key, so a retry returns the first result. Money is int64 cents; share
+// balances are int64 shares.
+syntax = "proto3";
+
+package accounts.v1;
+
+service AccountsService {
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  rpc Login(LoginRequest) returns (LoginResponse);
+  rpc Refresh(RefreshRequest) returns (RefreshResponse);
+  // Revokes the refresh token. Accounts owns refresh tokens, so it serves
+  // POST /v1/auth/logout. (Not in the spec's method list; added for that route.)
+  rpc Logout(LogoutRequest) returns (LogoutResponse);
+  rpc Deposit(DepositRequest) returns (DepositResponse);
+  rpc Withdraw(WithdrawRequest) returns (WithdrawResponse);
+  rpc GetBalances(GetBalancesRequest) returns (GetBalancesResponse);
+  rpc ListLedger(ListLedgerRequest) returns (ListLedgerResponse);
+  // Moves funds or shares from available to reserved, or fails with
+  // INSUFFICIENT_FUNDS (gRPC FAILED_PRECONDITION).
+  rpc Reserve(ReserveRequest) returns (ReserveResponse);
+  // Returns an exact amount from reserved to available.
+  rpc Release(ReleaseRequest) returns (ReleaseResponse);
+  // Updates both traders in one transaction.
+  rpc SettleTrade(SettleTradeRequest) returns (SettleTradeResponse);
+}
+
+// ------------------------------------------------------------------ auth
+
+message Tokens {
+  // JWT signed with Ed25519; expires in 15 minutes.
+  string access_token = 1;
+  int64 access_expires_at_ns = 2;
+  // Random 256-bit value; works once; expires in 30 days.
+  string refresh_token = 3;
+  int64 refresh_expires_at_ns = 4;
+}
+
+message RegisterRequest {
+  string email = 1;
+  string password = 2;
+}
+
+message RegisterResponse {
+  string user_id = 1;
+}
+
+message LoginRequest {
+  string email = 1;
+  string password = 2;
+}
+
+message LoginResponse {
+  string user_id = 1;
+  Tokens tokens = 2;
+}
+
+message RefreshRequest {
+  string refresh_token = 1;
+}
+
+message RefreshResponse {
+  Tokens tokens = 1;
+}
+
+message LogoutRequest {
+  string user_id = 1;
+  string refresh_token = 2;
+  // The access token's ID, added to the Redis revocation list.
+  string access_token_id = 3;
+}
+
+message LogoutResponse {}
+
+// ----------------------------------------------------- deposits and withdrawals
+
+message DepositRequest {
+  string user_id = 1;
+  // From the client's Idempotency-Key header.
+  string idempotency_key = 2;
+  int64 amount_cents = 3;
+}
+
+message DepositResponse {
+  string transaction_id = 1;
+  int64 available_cents = 2;
+}
+
+message WithdrawRequest {
+  string user_id = 1;
+  string idempotency_key = 2;
+  int64 amount_cents = 3;
+}
+
+message WithdrawResponse {
+  string transaction_id = 1;
+  int64 available_cents = 2;
+}
+
+// ---------------------------------------------------------------- balances
+
+message Balance {
+  // "USD" or a stock symbol.
+  string asset = 1;
+  // Cents for USD, shares for a stock.
+  int64 available = 2;
+  int64 reserved = 3;
+}
+
+message GetBalancesRequest {
+  string user_id = 1;
+}
+
+message GetBalancesResponse {
+  repeated Balance balances = 1;
+}
+
+message LedgerEntry {
+  string transaction_id = 1;
+  // For example "deposit", "reserve", "release", "settle".
+  string kind = 2;
+  string asset = 3;
+  // "available" or "reserved".
+  string account_kind = 4;
+  // Signed.
+  int64 amount = 5;
+  int64 created_at_ns = 6;
+}
+
+message ListLedgerRequest {
+  string user_id = 1;
+  // Opaque cursor from the previous page; empty for the first page.
+  string cursor = 2;
+  // At most 100.
+  int32 page_size = 3;
+}
+
+message ListLedgerResponse {
+  repeated LedgerEntry entries = 1;
+  // Empty when there are no more pages.
+  string next_cursor = 2;
+}
+
+// ------------------------------------------------------ order reservations
+
+message ReserveRequest {
+  // Also the idempotency key (reserve:{order_id}).
+  string order_id = 1;
+  string user_id = 2;
+  // "USD" for buys, the stock symbol for sells.
+  string asset = 3;
+  // Cents for buys (limit price x quantity), shares for sells.
+  int64 amount = 4;
+  // Set for buys, so settlement can return price improvement. 0 for sells.
+  int64 limit_price_cents = 5;
+}
+
+message ReserveResponse {
+  int64 reserved_amount = 1;
+}
+
+message ReleaseRequest {
+  string order_id = 1;
+  // release:{event_id}
+  string idempotency_key = 2;
+  int64 amount = 3;
+  // If no reservation exists, write a voided one so a delayed Reserve for
+  // this order fails instead of locking funds forever. With this set, the
+  // full remaining amount is released when the reservation does exist.
+  bool void_if_missing = 4;
+}
+
+message ReleaseResponse {
+  int64 released_amount = 1;
+  // Amount still reserved for the order afterwards.
+  int64 remaining_amount = 2;
+}
+
+message SettleTradeRequest {
+  // Also the idempotency key (settle:{trade_id}).
+  string trade_id = 1;
+  string symbol = 2;
+  int64 price_cents = 3;
+  int64 quantity = 4;
+  string buy_order_id = 5;
+  string sell_order_id = 6;
+  string buyer_id = 7;
+  string seller_id = 8;
+}
+
+message SettleTradeResponse {
+  string transaction_id = 1;
+  // Returned to the buyer: (limit price - trade price) x quantity.
+  int64 price_improvement_cents = 2;
+}
