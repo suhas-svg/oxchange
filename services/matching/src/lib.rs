@@ -19,6 +19,9 @@
 pub mod codec;
 mod dedup;
 mod engine;
+#[cfg(feature = "kafka")]
+pub mod kafka;
+pub mod pipeline;
 pub mod snapshot;
 
 use std::io;

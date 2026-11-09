@@ -1,0 +1,105 @@
+# Local development stack (spec: "Deployment": Docker Compose for daily
+# development, one Redpanda broker locally).
+#
+#   docker compose up -d --build          # Redpanda, topics, 4 matchers, order-entry
+#   docker compose run --rm e2e e2e ...   # end-to-end tools
+#   scripts/e2e-restart.sh                # Gate 1 restart check
+name: oxchange
+
+x-app: &app
+  image: oxchange:dev
+  build:
+    context: .
+    dockerfile: deploy/docker/Dockerfile
+  environment: &app-env
+    KAFKA_BROKERS: redpanda:9092
+    RUST_LOG: ${RUST_LOG:-info}
+  depends_on:
+    topics:
+      condition: service_completed_successfully
+
+x-matching: &matching
+  <<: *app
+  command: ["matching"]
+  # Exit non-zero means halted: restart and recover from the newest snapshot.
+  restart: on-failure
+  read_only: true
+  # The spec's shutdown budget is 25 s; give it room before SIGKILL.
+  stop_grace_period: 30s
+
+services:
+  redpanda:
+    image: redpandadata/redpanda:v24.2.7
+    command:
+      - redpanda
+      - start
+      - --mode=dev-container
+      - --smp=1
+      - --memory=1G
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
+      - --default-log-level=warn
+    ports:
+      - "19092:19092"
+    volumes:
+      - redpanda:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true'"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  # Creates the topics from the spec's "Messaging → Topics" table. Safe to rerun.
+  topics:
+    image: redpandadata/redpanda:v24.2.7
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        B="-X brokers=redpanda:9092"
+        create() { rpk topic create "$$@" $$B || rpk topic describe "$$1" $$B >/dev/null; }
+        for t in orders.commands matching.events settlement.events accounts.events; do
+          create "$$t" -p 4 -r 1 -c retention.ms=604800000
+        done
+        create orders.commands.dlq -p 1 -r 1 -c retention.ms=2592000000
+        rpk topic list $$B
+
+  matching-0:
+    <<: *matching
+    environment: { <<: *app-env, PARTITION: "0", SNAPSHOT_DIR: /var/lib/matching, SNAPSHOT_INTERVAL: "${SNAPSHOT_INTERVAL:-100000}" }
+    volumes: ["matching-0:/var/lib/matching"]
+  matching-1:
+    <<: *matching
+    environment: { <<: *app-env, PARTITION: "1", SNAPSHOT_DIR: /var/lib/matching, SNAPSHOT_INTERVAL: "${SNAPSHOT_INTERVAL:-100000}" }
+    volumes: ["matching-1:/var/lib/matching"]
+  matching-2:
+    <<: *matching
+    environment: { <<: *app-env, PARTITION: "2", SNAPSHOT_DIR: /var/lib/matching, SNAPSHOT_INTERVAL: "${SNAPSHOT_INTERVAL:-100000}" }
+    volumes: ["matching-2:/var/lib/matching"]
+  matching-3:
+    <<: *matching
+    environment: { <<: *app-env, PARTITION: "3", SNAPSHOT_DIR: /var/lib/matching, SNAPSHOT_INTERVAL: "${SNAPSHOT_INTERVAL:-100000}" }
+    volumes: ["matching-3:/var/lib/matching"]
+
+  # Development stand-in for the Gateway and Risk: no login, no funds checks.
+  order-entry:
+    <<: *app
+    command: ["order-entry"]
+    ports:
+      - "8080:8080"
+    restart: on-failure
+
+  e2e:
+    <<: *app
+    profiles: ["tools"]
+    command: ["e2e", "verify"]
+
+volumes:
+  redpanda:
+  matching-0:
+  matching-1:
+  matching-2:
+  matching-3:
