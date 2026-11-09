@@ -28,7 +28,7 @@ RUN rustup component add clippy && cargo clippy --release --all-features --all-t
 
 FROM debian:bookworm-slim AS runtime
 RUN useradd --system --uid 10001 --home /nonexistent oxchange \
- && mkdir -p /var/lib/matching && chown oxchange /var/lib/matching
+ && mkdir -p /var/lib/matching /keys && chown oxchange /var/lib/matching /keys
 COPY --from=builder /out/ /usr/local/bin/
 USER oxchange
 ENV RUST_LOG=info

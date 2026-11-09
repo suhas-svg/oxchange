@@ -185,10 +185,14 @@ message Deposited {
   int64 amount_cents = 1;
   // Available USD balance after the deposit.
   int64 balance_cents = 2;
+  // "USD" when empty, or a stock symbol (then amounts are shares).
+  string asset = 3;
 }
 
 message Withdrawn {
   int64 amount_cents = 1;
   // Available USD balance after the withdrawal.
   int64 balance_cents = 2;
+  // "USD" when empty, or a stock symbol (then amounts are shares).
+  string asset = 3;
 }

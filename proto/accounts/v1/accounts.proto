@@ -81,10 +81,15 @@ message DepositRequest {
   // From the client's Idempotency-Key header.
   string idempotency_key = 2;
   int64 amount_cents = 3;
+  // "USD" (the default when empty) or a stock symbol. Simulated shares enter
+  // the system the same way simulated money does. (Not in the spec, which
+  // gives no way for sellers to get shares.)
+  string asset = 4;
 }
 
 message DepositResponse {
   string transaction_id = 1;
+  // Available balance of the asset afterwards (cents, or shares for a stock).
   int64 available_cents = 2;
 }
 
@@ -92,10 +97,15 @@ message WithdrawRequest {
   string user_id = 1;
   string idempotency_key = 2;
   int64 amount_cents = 3;
+  // "USD" (the default when empty) or a stock symbol. Simulated shares enter
+  // the system the same way simulated money does. (Not in the spec, which
+  // gives no way for sellers to get shares.)
+  string asset = 4;
 }
 
 message WithdrawResponse {
   string transaction_id = 1;
+  // Available balance of the asset afterwards (cents, or shares for a stock).
   int64 available_cents = 2;
 }
 

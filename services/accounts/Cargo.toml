@@ -1,0 +1,30 @@
+[package]
+name = "accounts"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+argon2.workspace = true
+auth.workspace = true
+axum.workspace = true
+domain.workspace = true
+prost.workspace = true
+proto-gen.workspace = true
+sha2.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio.workspace = true
+tonic.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+testcontainers-modules.workspace = true
+
+[lints]
+workspace = true
