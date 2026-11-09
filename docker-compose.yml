@@ -1,7 +1,7 @@
 # Local development stack (spec: "Deployment": Docker Compose for daily
 # development, one Redpanda broker locally).
 #
-#   docker compose up -d --build          # Redpanda, topics, 4 matchers, order-entry
+#   docker compose up -d --build          # Postgres, Redpanda, Accounts, 4 matchers, order-entry
 #   docker compose run --rm e2e e2e ...   # end-to-end tools
 #   scripts/e2e-restart.sh                # Gate 1 restart check
 name: oxchange
@@ -84,6 +84,59 @@ services:
     environment: { <<: *app-env, PARTITION: "3", SNAPSHOT_DIR: /var/lib/matching, SNAPSHOT_INTERVAL: "${SNAPSHOT_INTERVAL:-100000}" }
     volumes: ["matching-3:/var/lib/matching"]
 
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "15432:5432"
+    volumes:
+      - postgres:/var/lib/postgresql/data
+      - ./deploy/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d accounts"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  # Writes the JWT key pair to a volume on first start (never committed).
+  jwt-keys:
+    image: oxchange:dev
+    command: ["accounts", "keygen", "/keys"]
+    volumes: ["jwt-keys:/keys"]
+
+  accounts-migrate:
+    image: oxchange:dev
+    command: ["accounts", "migrate"]
+    environment:
+      DATABASE_URL: postgres://accounts:accounts-dev@postgres:5432/accounts
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  accounts:
+    image: oxchange:dev
+    command: ["accounts", "serve"]
+    environment:
+      DATABASE_URL: postgres://accounts:accounts-dev@postgres:5432/accounts
+      JWT_PRIVATE_KEY_FILE: /keys/jwt-private.pem
+      RUST_LOG: ${RUST_LOG:-info}
+    volumes: ["jwt-keys:/keys:ro"]
+    ports:
+      - "50051:50051"
+    read_only: true
+    restart: on-failure
+    depends_on:
+      jwt-keys:
+        condition: service_completed_successfully
+      accounts-migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "accounts", "health"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
   # Development stand-in for the Gateway and Risk: no login, no funds checks.
   order-entry:
     <<: *app
@@ -98,6 +151,8 @@ services:
     command: ["e2e", "verify"]
 
 volumes:
+  postgres:
+  jwt-keys:
   redpanda:
   matching-0:
   matching-1:

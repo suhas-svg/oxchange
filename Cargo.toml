@@ -1,6 +1,15 @@
 [workspace]
 resolver = "3"
-members = ["crates/domain", "crates/order-book", "crates/proto-gen", "services/matching", "services/order-entry", "tools/e2e"]
+members = [
+    "crates/auth",
+    "crates/domain",
+    "crates/order-book",
+    "crates/proto-gen",
+    "services/accounts",
+    "services/matching",
+    "services/order-entry",
+    "tools/e2e",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -9,6 +18,16 @@ rust-version = "1.90"
 license = "MIT"
 
 [workspace.dependencies]
+auth = { path = "crates/auth" }
+argon2 = "0.5"
+base64 = "0.22"
+ed25519-dalek = { version = "2", features = ["pkcs8", "pem", "rand_core", "std"] }
+getrandom = "0.3"
+rand_core = { version = "0.6", features = ["getrandom"] }
+sha2 = "0.10"
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "postgres", "migrate", "uuid", "time", "macros"] }
+testcontainers-modules = { version = "0.15", features = ["postgres"] }
+time = "0.3"
 domain = { path = "crates/domain" }
 order-book = { path = "crates/order-book" }
 proto-gen = { path = "crates/proto-gen" }
@@ -51,3 +70,11 @@ codegen-units = 1
 [profile.release]
 lto = "fat"
 codegen-units = 1
+
+# Argon2id is deliberately slow; unoptimized it makes each test login take
+# seconds. Optimize just the hashing crates in dev and test builds.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3
