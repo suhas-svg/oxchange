@@ -2,8 +2,9 @@
 # development, one Redpanda broker locally).
 #
 #   docker compose up -d --build          # Postgres, Redis, Redpanda, Accounts, Risk, Settlement,
-#                                         # Market Data (http://localhost:8090), Notifications
-#                                         # (http://localhost:8091), 4 matchers, order-entry
+#                                         # Market Data, Notifications, 4 matchers, and the
+#                                         # API Gateway, and the dashboard at http://localhost:3000
+#   docker compose --profile legacy up -d order-entry   # Phase 1 order endpoint (no login, skips Risk)
 #   docker compose run --rm auditor       # the 11 auditor rules (add --traffic-stopped once orders stop)
 #   docker compose run --rm e2e e2e ...   # end-to-end tools
 #   scripts/e2e-restart.sh                # Gate 1 restart check
@@ -237,8 +238,8 @@ services:
       postgres:
         condition: service_healthy
 
-  # REST for book, trades and candles, and /ws/public. Host port 8090,
-  # because 8080 belongs to order-entry.
+  # REST for book, trades and candles, and /ws/public. Browsers reach it
+  # through the Gateway; host port 8090 is for debugging.
   market-data:
     image: oxchange:dev
     command: ["market-data", "serve"]
@@ -317,8 +318,57 @@ services:
         condition: service_healthy
 
   # Development stand-in for the Gateway and Risk: no login, no funds checks.
+  # The only service browsers talk to. Host port 8000.
+  gateway:
+    image: oxchange:dev
+    command: ["gateway", "serve"]
+    environment:
+      ACCOUNTS_GRPC_URL: http://accounts:50051
+      RISK_GRPC_URL: http://risk:50051
+      MARKET_DATA_URL: http://market-data:8080
+      NOTIFICATIONS_URL: http://notifications:8080
+      REDIS_URL: redis://redis:6379
+      JWT_PUBLIC_KEY_FILE: /keys/jwt-public.pem
+      # The web server in front replaces X-Forwarded-For. The host port is
+      # bound to localhost only (for the Vite dev server), so nobody else can
+      # reach the Gateway directly and spoof the header.
+      TRUST_FORWARDED_FOR: "true"
+      RUST_LOG: ${RUST_LOG:-info}
+    volumes: ["jwt-keys:/keys:ro"]
+    ports:
+      - "127.0.0.1:8000:8080"
+    read_only: true
+    restart: on-failure
+    depends_on:
+      jwt-keys:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "gateway", "health"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # The dashboard at http://localhost:3000, in front of the Gateway.
+  web:
+    build:
+      context: ./web
+    image: oxchange-web:dev
+    ports:
+      - "3000:8080"
+    read_only: true
+    tmpfs: ["/tmp"]
+    restart: on-failure
+    depends_on:
+      gateway:
+        condition: service_healthy
+
+  # Phase 1's development endpoint: no login, and it bypasses Risk. Kept
+  # for the Gate 1 tools; the Gateway replaces it.
   order-entry:
     <<: *app
+    profiles: ["legacy"]
     command: ["order-entry"]
     ports:
       - "8080:8080"

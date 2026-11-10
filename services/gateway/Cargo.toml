@@ -1,0 +1,36 @@
+[package]
+name = "gateway"
+description = "Oxchange API Gateway: login checks, rate limits, REST to gRPC, and WebSocket proxies."
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+auth.workspace = true
+axum = { workspace = true, features = ["ws"] }
+bytes = "1"
+futures-util.workspace = true
+http-body-util.workspace = true
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+proto-gen.workspace = true
+redis.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ticker.workspace = true
+time = { workspace = true, features = ["formatting"] }
+tokio = { workspace = true, features = ["sync"] }
+tokio-tungstenite = "0.29"
+tonic.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+testcontainers-modules.workspace = true
+tokio-stream = { version = "0.1", features = ["net"] }
+
+[lints]
+workspace = true

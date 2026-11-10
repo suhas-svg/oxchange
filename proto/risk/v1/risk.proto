@@ -13,6 +13,8 @@ service RiskService {
   rpc CancelOrder(CancelOrderRequest) returns (CancelOrderResponse);
   rpc GetOrder(GetOrderRequest) returns (GetOrderResponse);
   rpc ListOrders(ListOrdersRequest) returns (ListOrdersResponse);
+  // The listed stocks, for GET /v1/symbols. Needs no user.
+  rpc ListSymbols(ListSymbolsRequest) returns (ListSymbolsResponse);
 }
 
 enum OrderStatus {
@@ -104,4 +106,19 @@ message ListOrdersResponse {
   repeated Order orders = 1;
   // Empty when there are no more pages.
   string next_cursor = 2;
+}
+
+message ListSymbolsRequest {}
+
+message SymbolInfo {
+  string symbol = 1;
+  string name = 2;
+  // Whether new orders are accepted.
+  bool trading = 3;
+  // The price the stock was listed at; a starting point before any trade.
+  int64 listing_price_cents = 4;
+}
+
+message ListSymbolsResponse {
+  repeated SymbolInfo symbols = 1;
 }

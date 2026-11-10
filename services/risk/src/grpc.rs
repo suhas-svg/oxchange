@@ -71,4 +71,11 @@ impl<A: AccountsApi> RiskService for Service<A> {
     ) -> Reply<pb::ListOrdersResponse> {
         reply(self.0.list_orders(&r.into_inner()).await)
     }
+
+    async fn list_symbols(
+        &self,
+        _r: Request<pb::ListSymbolsRequest>,
+    ) -> Reply<pb::ListSymbolsResponse> {
+        reply(self.0.list_symbols().await)
+    }
 }

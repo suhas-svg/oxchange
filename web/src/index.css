@@ -1,0 +1,91 @@
+@import "tailwindcss";
+@import "@fontsource-variable/inter";
+@import "@fontsource-variable/jetbrains-mono";
+
+/* A dark trading terminal. Every color is a token here, so components only
+   ever name roles (surface, up, down), never raw values. */
+@theme {
+  --font-sans: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, "SFMono-Regular", monospace;
+
+  --color-canvas: #090c10;
+  --color-surface: #0f141a;
+  --color-raised: #151b23;
+  --color-hover: #1b222c;
+  --color-line: #222b36;
+  --color-line-strong: #2e3947;
+
+  --color-ink: #e7ebf0;
+  --color-ink-2: #a3adba;
+  --color-ink-3: #6b7685;
+
+  --color-accent: #4f8cff;
+  --color-accent-ink: #f5f8ff;
+
+  --color-up: #22c39a;
+  --color-up-soft: rgb(34 195 154 / 0.14);
+  --color-down: #f0596b;
+  --color-down-soft: rgb(240 89 107 / 0.14);
+  --color-warn: #e9b949;
+  --color-warn-soft: rgb(233 185 73 / 0.14);
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    background: var(--color-canvas);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    font-feature-settings: "cv11", "ss01";
+    -webkit-font-smoothing: antialiased;
+  }
+  ::selection {
+    background: rgb(79 140 255 / 0.35);
+  }
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+  input[type="number"]::-webkit-inner-spin-button,
+  input[type="number"]::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+}
+
+@layer utilities {
+  /* Prices and quantities: fixed-width digits so columns never jiggle. */
+  .num {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.01em;
+  }
+  .scroll-thin {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-line-strong) transparent;
+  }
+}
+
+@keyframes flash-up {
+  from { background-color: rgb(34 195 154 / 0.28); }
+  to { background-color: transparent; }
+}
+@keyframes flash-down {
+  from { background-color: rgb(240 89 107 / 0.28); }
+  to { background-color: transparent; }
+}
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+.flash-up { animation: flash-up 0.9s ease-out; }
+.flash-down { animation: flash-down 0.9s ease-out; }
+.toast-in { animation: toast-in 0.18s ease-out; }
+
+@media (prefers-reduced-motion: reduce) {
+  .flash-up, .flash-down, .toast-in { animation: none; }
+}
