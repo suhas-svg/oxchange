@@ -9,6 +9,7 @@ members = [
     "crates/proto-gen",
     "crates/ticker",
     "services/accounts",
+    "services/gateway",
     "services/market-data",
     "services/matching",
     "services/notifications",

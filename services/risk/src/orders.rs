@@ -433,6 +433,28 @@ impl<A: AccountsApi> Risk<A> {
         })
     }
 
+    /// Every listed stock, in symbol order.
+    pub async fn list_symbols(&self) -> Result<pb::ListSymbolsResponse> {
+        let rows: Vec<(String, String, bool, i64)> = sqlx::query_as(
+            "SELECT symbol, name, trading, listing_price_cents FROM symbols ORDER BY symbol",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(pb::ListSymbolsResponse {
+            symbols: rows
+                .into_iter()
+                .map(
+                    |(symbol, name, trading, listing_price_cents)| pb::SymbolInfo {
+                        symbol,
+                        name,
+                        trading,
+                        listing_price_cents,
+                    },
+                )
+                .collect(),
+        })
+    }
+
     pub async fn list_orders(&self, r: &pb::ListOrdersRequest) -> Result<pb::ListOrdersResponse> {
         let user = parse_uuid(&r.user_id, "user_id")?;
         let before = if r.cursor.is_empty() {

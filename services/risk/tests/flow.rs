@@ -324,3 +324,21 @@ fn b_list(b: &str) -> pb::ListOrdersRequest {
         ..Default::default()
     }
 }
+
+/// GET /v1/symbols, through the Gateway.
+#[tokio::test]
+async fn the_listed_stocks_come_back_in_symbol_order() {
+    let e = env().await;
+    let list = e.risk.list_symbols().await.unwrap().symbols;
+    assert_eq!(list.len(), 20);
+    assert_eq!(
+        (
+            list[0].symbol.as_str(),
+            list[0].name.as_str(),
+            list[0].trading
+        ),
+        ("ACME", "Acme Simulated Holdings", true)
+    );
+    assert_eq!(list[0].listing_price_cents, 1000);
+    assert!(list.windows(2).all(|w| w[0].symbol < w[1].symbol));
+}
