@@ -14,6 +14,7 @@ use crate::HandlerError;
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
 pub struct Record<'a> {
+    pub topic: &'a str,
     pub partition: i32,
     pub offset: i64,
     pub key: Option<&'a [u8]>,
@@ -22,6 +23,11 @@ pub struct Record<'a> {
 }
 
 pub fn consumer(brokers: &str, group: &str, topic: &str) -> Result<StreamConsumer, String> {
+    consumer_for(brokers, group, &[topic])
+}
+
+/// One consumer reading several topics, each message tagged with its topic.
+pub fn consumer_for(brokers: &str, group: &str, topics: &[&str]) -> Result<StreamConsumer, String> {
     let c: StreamConsumer = ClientConfig::new()
         .set("bootstrap.servers", brokers)
         .set("group.id", group)
@@ -30,7 +36,7 @@ pub fn consumer(brokers: &str, group: &str, topic: &str) -> Result<StreamConsume
         .set("enable.partition.eof", "false")
         .create()
         .map_err(|e| e.to_string())?;
-    c.subscribe(&[topic]).map_err(|e| e.to_string())?;
+    c.subscribe(topics).map_err(|e| e.to_string())?;
     Ok(c)
 }
 
@@ -63,6 +69,7 @@ pub async fn run<F, Fut>(
         let mut backoff = Duration::from_millis(100);
         loop {
             let record = Record {
+                topic: msg.topic(),
                 partition: msg.partition(),
                 offset: msg.offset(),
                 key: msg.key(),

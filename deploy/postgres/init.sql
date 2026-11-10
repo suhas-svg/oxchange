@@ -17,6 +17,10 @@ CREATE ROLE market_data LOGIN PASSWORD 'market-data-dev';
 CREATE DATABASE market_data OWNER market_data;
 REVOKE ALL ON DATABASE market_data FROM PUBLIC;
 
+CREATE ROLE notifications LOGIN PASSWORD 'notifications-dev';
+CREATE DATABASE notifications OWNER notifications;
+REVOKE ALL ON DATABASE notifications FROM PUBLIC;
+
 -- The auditor reads every database through this read-only login (spec:
 -- "Auditor"). Default privileges cover the tables each service's
 -- migrations create later.

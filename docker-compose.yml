@@ -2,7 +2,8 @@
 # development, one Redpanda broker locally).
 #
 #   docker compose up -d --build          # Postgres, Redis, Redpanda, Accounts, Risk, Settlement,
-#                                         # Market Data (http://localhost:8090), 4 matchers, order-entry
+#                                         # Market Data (http://localhost:8090), Notifications
+#                                         # (http://localhost:8091), 4 matchers, order-entry
 #   docker compose run --rm auditor       # the 11 auditor rules (add --traffic-stopped once orders stop)
 #   docker compose run --rm e2e e2e ...   # end-to-end tools
 #   scripts/e2e-restart.sh                # Gate 1 restart check
@@ -66,7 +67,9 @@ services:
         for t in orders.commands matching.events settlement.events accounts.events; do
           create "$$t" -p 4 -r 1 -c retention.ms=604800000
         done
-        create orders.commands.dlq -p 1 -r 1 -c retention.ms=2592000000
+        for t in orders.commands matching.events settlement.events accounts.events; do
+          create "$$t.dlq" -p 1 -r 1 -c retention.ms=2592000000
+        done
         rpk topic list $$B
 
   matching-0:
@@ -97,7 +100,7 @@ services:
       - ./deploy/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
       # The last database init.sql creates, so all of them exist.
-      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d market_data"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d notifications"]
       interval: 2s
       timeout: 5s
       retries: 30
@@ -258,6 +261,42 @@ services:
         condition: service_started
     healthcheck:
       test: ["CMD", "market-data", "health"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  notifications-migrate:
+    image: oxchange:dev
+    command: ["notifications", "migrate"]
+    environment:
+      DATABASE_URL: postgres://notifications:notifications-dev@postgres:5432/notifications
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # GET /v1/notifications, POST /v1/ws-ticket and /ws/private. Host port
+  # 8091. The /v1 routes trust X-User-Id until the Gateway sits in front.
+  notifications:
+    image: oxchange:dev
+    command: ["notifications", "serve"]
+    environment:
+      DATABASE_URL: postgres://notifications:notifications-dev@postgres:5432/notifications
+      KAFKA_BROKERS: redpanda:9092
+      REDIS_URL: redis://redis:6379
+      RUST_LOG: ${RUST_LOG:-info}
+    ports:
+      - "8091:8080"
+    read_only: true
+    restart: on-failure
+    depends_on:
+      notifications-migrate:
+        condition: service_completed_successfully
+      topics:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "notifications", "health"]
       interval: 2s
       timeout: 3s
       retries: 30
