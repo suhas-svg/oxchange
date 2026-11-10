@@ -11,6 +11,7 @@ members = [
     "services/accounts",
     "services/market-data",
     "services/matching",
+    "services/notifications",
     "services/order-entry",
     "services/risk",
     "services/settlement",
