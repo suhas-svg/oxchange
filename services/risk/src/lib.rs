@@ -80,11 +80,24 @@ pub type Result<T, E = RiskError> = std::result::Result<T, E>;
 pub struct Risk<A> {
     pool: PgPool,
     accounts: A,
+    /// Reference prices for market orders; without them market orders are
+    /// rejected.
+    prices: Option<std::sync::Arc<ticker::Store>>,
 }
 
 impl<A: AccountsApi> Risk<A> {
     pub fn new(pool: PgPool, accounts: A) -> Self {
-        Self { pool, accounts }
+        Self {
+            pool,
+            accounts,
+            prices: None,
+        }
+    }
+
+    /// Reads market-order reference prices from the Redis ticker.
+    pub fn with_prices(mut self, prices: std::sync::Arc<ticker::Store>) -> Self {
+        self.prices = Some(prices);
+        self
     }
 
     pub fn pool(&self) -> &PgPool {

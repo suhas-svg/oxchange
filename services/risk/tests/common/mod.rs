@@ -28,6 +28,7 @@ use risk::{AccountsApi, GrpcAccounts, Risk};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 use testcontainers_modules::postgres::Postgres;
+use testcontainers_modules::redis::Redis;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 use testcontainers_modules::testcontainers::{ContainerAsync, ImageExt};
 use tonic::Status;
@@ -135,7 +136,10 @@ pub struct Env {
     offset: Mutex<u64>,
     /// Every event the engine produced, in order.
     pub events: Mutex<Vec<ev::MatchingEvent>>,
+    /// Market Data's ticker, for market orders (see [`env_with_prices`]).
+    pub prices: Option<Arc<ticker::Store>>,
     _container: ContainerAsync<Postgres>,
+    pub redis: Option<ContainerAsync<Redis>>,
 }
 
 async fn pool(url: &str) -> PgPool {
@@ -147,6 +151,30 @@ async fn pool(url: &str) -> PgPool {
 }
 
 pub async fn env() -> Env {
+    env_inner(false).await
+}
+
+/// [`env`] plus a Redis container holding the ticker Risk reads.
+pub async fn env_with_prices() -> Env {
+    env_inner(true).await
+}
+
+async fn env_inner(with_prices: bool) -> Env {
+    let (redis, prices) = if with_prices {
+        let r = Redis::default()
+            .with_tag("7-alpine")
+            .start()
+            .await
+            .expect("start redis");
+        let url = format!(
+            "redis://{}:{}",
+            r.get_host().await.unwrap(),
+            r.get_host_port_ipv4(6379).await.unwrap()
+        );
+        (Some(r), Some(Arc::new(ticker::Store::new(&url).unwrap())))
+    } else {
+        (None, None)
+    };
     let container = Postgres::default()
         .with_tag("16-alpine")
         .start()
@@ -186,8 +214,14 @@ pub async fn env() -> Env {
         inner: GrpcAccounts::connect_lazy(&format!("http://{proxied}")).unwrap(),
         mode: mode.clone(),
     };
+    let mut risk = Risk::new(risk_db, client);
+    if let Some(p) = &prices {
+        risk = risk.with_prices(p.clone());
+    }
     Env {
-        risk: Arc::new(Risk::new(risk_db, client)),
+        risk: Arc::new(risk),
+        prices,
+        redis,
         accounts,
         mode,
         delay_ms,

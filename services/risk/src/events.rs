@@ -80,13 +80,6 @@ impl<A: AccountsApi> Risk<A> {
                     .await
                     .map_err(db_error)?;
                 }
-                // The reference price for market orders (see the migration).
-                sqlx::query("UPDATE symbols SET last_price_cents = $2 WHERE symbol = $1")
-                    .bind(&e.symbol)
-                    .bind(t.price_cents)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(db_error)?;
             }
             Some(ev::matching_event::Body::OrderCanceled(c)) => {
                 let id = order_id(&c.order_id)?;

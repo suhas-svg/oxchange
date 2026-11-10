@@ -81,6 +81,31 @@ impl<A: AccountsApi> Risk<A> {
         .await?)
     }
 
+    /// The last trade price from `ticker:{symbol}`. Without it (Redis down,
+    /// or the stock has never traded) market orders are rejected and limit
+    /// orders carry on (spec: "Redis → If Redis is lost").
+    async fn reference_price(&self, symbol: &Symbol) -> Result<Price> {
+        let Some(prices) = &self.prices else {
+            return Err(RiskError::Unavailable(
+                "market orders are paused: no market data; use a limit order".into(),
+            ));
+        };
+        match prices.read(symbol.as_str()).await {
+            Ok(Some(t)) => Price::new(t.last_price_cents)
+                .map_err(|_| RiskError::Unavailable("no usable reference price".into())),
+            Ok(None) => Err(RiskError::Unavailable(
+                "no trades yet, so no reference price for a market order; use a limit order".into(),
+            )),
+            Err(e) => {
+                tracing::warn!(error = %e, "ticker unavailable; market order rejected");
+                Err(RiskError::Unavailable(
+                    "market orders are paused: market data is unavailable; use a limit order"
+                        .into(),
+                ))
+            }
+        }
+    }
+
     /// Spec checks 1 to 5, in order. Check 6 is the reservation itself.
     async fn check(&self, r: &pb::PlaceOrderRequest, user: Uuid) -> Result<NewOrder> {
         let symbol = Symbol::new(&r.symbol).map_err(|_| RiskError::SymbolNotTrading)?;
@@ -98,23 +123,21 @@ impl<A: AccountsApi> Risk<A> {
             .filter(|t| *t != ev::TimeInForce::Unspecified);
 
         // 1. The stock exists and is open for trading.
-        let row: Option<(i64, Option<i64>, bool)> = sqlx::query_as(
-            "SELECT listing_price_cents, last_price_cents, trading FROM symbols WHERE symbol = $1",
-        )
-        .bind(symbol.as_str())
-        .fetch_optional(&self.pool)
-        .await?;
-        let Some((listing, last, true)) = row else {
+        let trading: Option<bool> =
+            sqlx::query_scalar("SELECT trading FROM symbols WHERE symbol = $1")
+                .bind(symbol.as_str())
+                .fetch_optional(&self.pool)
+                .await?;
+        if trading != Some(true) {
             return Err(RiskError::SymbolNotTrading);
-        };
+        }
 
         // 2. Price and quantity are within the limits. 5. A market order has
-        //    a reference price: the last trade, or the listing price.
+        //    a reference price: the last trade, from Market Data's ticker.
         let qty = Qty::new_order(r.quantity).map_err(|e| invalid(e.to_string()))?;
         let (limit, order_type, tif) = match order_type {
             ev::OrderType::Market => {
-                let reference = Price::new(last.unwrap_or(listing))
-                    .map_err(|_| RiskError::Unavailable("no usable reference price".into()))?;
+                let reference = self.reference_price(&symbol).await?;
                 // Market orders always run as IOC (spec: "Order types").
                 (market_protected_price(side, reference), "MARKET", "IOC")
             }

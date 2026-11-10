@@ -6,7 +6,7 @@
 //! risk health    exit 0 if this host's /readyz answers 200 (container healthcheck)
 //! ```
 //!
-//! Environment: DATABASE_URL, ACCOUNTS_GRPC_URL, KAFKA_BROKERS; optional
+//! Environment: DATABASE_URL, ACCOUNTS_GRPC_URL, KAFKA_BROKERS, REDIS_URL; optional
 //! LISTEN_ADDR (0.0.0.0:50051) and HEALTH_ADDR (0.0.0.0:8081).
 
 use std::process::ExitCode;
@@ -93,7 +93,8 @@ async fn serve() -> Result<(), BoxError> {
     let pool = connect().await?;
     let listen = env_or("LISTEN_ADDR", "0.0.0.0:50051").parse()?;
     let health_addr = env_or("HEALTH_ADDR", "0.0.0.0:8081");
-    let risk = Arc::new(Risk::new(pool.clone(), accounts));
+    let prices = Arc::new(ticker::Store::new(&env("REDIS_URL")?)?);
+    let risk = Arc::new(Risk::new(pool.clone(), accounts).with_prices(prices));
     let (stop_tx, stop_rx) = watch::channel(false);
     let mut tasks = tokio::task::JoinSet::new();
 

@@ -2,8 +2,8 @@
 //!
 //! This crate holds the partition [`Engine`] (all order books of one Kafka
 //! partition, the input offset, and the duplicate-command memory) and its
-//! [`SnapshotStore`]. The Kafka reader/writer threads and the gRPC `GetBook`
-//! server come next and wrap this logic without changing it.
+//! [`SnapshotStore`], the thread [`pipeline`] around them, the gRPC
+//! `GetBook` server ([`grpc`]), and the Kafka adapters (feature `kafka`).
 //!
 //! Recovery (spec: "Matching Engine → Recovery"):
 //! 1. Load the newest snapshot with a valid checksum ([`recover`]).
@@ -19,6 +19,7 @@
 pub mod codec;
 mod dedup;
 mod engine;
+pub mod grpc;
 #[cfg(feature = "kafka")]
 pub mod kafka;
 pub mod pipeline;

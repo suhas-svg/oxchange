@@ -22,11 +22,11 @@
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TryRecvError, sync_channel};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use domain::Symbol;
+use domain::{Side, Symbol};
 use order_book::Command;
 use thiserror::Error;
 
@@ -119,6 +119,27 @@ impl Default for PipelineConfig {
     }
 }
 
+/// A request for one stock's current book, answered between commands.
+pub struct BookQuery {
+    pub symbol: Symbol,
+    pub reply: SyncSender<BookView>,
+}
+
+/// One stock's book as of an exact event.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BookView {
+    /// The seq of the last event already reflected in this book (0 for a
+    /// stock with no events yet).
+    pub as_of_seq: u64,
+    /// `(price cents, total quantity)`, best (highest) bid first.
+    pub bids: Vec<(i64, i64)>,
+    /// `(price cents, total quantity)`, best (lowest) ask first.
+    pub asks: Vec<(i64, i64)>,
+}
+
+/// How long the idle matcher waits for a command before checking queries.
+const IDLE_POLL: Duration = Duration::from_millis(5);
+
 /// What a finished run did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PipelineReport {
@@ -174,11 +195,30 @@ enum Output {
 /// queue, flushes the sink and returns. Any stage failing stops the others.
 pub fn run<S, K, P>(
     engine: Engine,
+    source: S,
+    sink: K,
+    persist: P,
+    config: PipelineConfig,
+    stop: Arc<AtomicBool>,
+) -> Result<PipelineReport, PipelineError>
+where
+    S: CommandSource,
+    K: EventSink,
+    P: SnapshotPersist,
+{
+    let (_no_queries, queries) = sync_channel(1);
+    run_with_queries(engine, source, sink, persist, config, stop, queries)
+}
+
+/// [`run`], also answering [`BookQuery`]s from `queries` between commands.
+pub fn run_with_queries<S, K, P>(
+    engine: Engine,
     mut source: S,
     mut sink: K,
     mut persist: P,
     config: PipelineConfig,
     stop: Arc<AtomicBool>,
+    queries: Receiver<BookQuery>,
 ) -> Result<PipelineReport, PipelineError>
 where
     S: CommandSource,
@@ -198,7 +238,7 @@ where
     let matcher_cfg = config.clone();
     let matcher = thread::Builder::new()
         .name("matching-matcher".into())
-        .spawn(move || match_loop(engine, &in_rx, &out_tx, &matcher_cfg))
+        .spawn(move || match_loop(engine, &in_rx, &out_tx, &queries, &matcher_cfg))
         .expect("spawn matcher");
     let writer = thread::Builder::new()
         .name("matching-writer".into())
@@ -276,13 +316,21 @@ fn match_loop(
     mut engine: Engine,
     rx: &Receiver<Input>,
     tx: &SyncSender<Output>,
+    queries: &Receiver<BookQuery>,
     config: &PipelineConfig,
 ) -> (PipelineReport, Option<EngineError>) {
     let mut report = PipelineReport::default();
     let mut events = Vec::with_capacity(16);
     let mut halted = None;
 
-    'commands: for input in rx.iter() {
+    'commands: loop {
+        // Between commands: answer any waiting book queries.
+        answer_queries(&engine, queries);
+        let input = match rx.recv_timeout(IDLE_POLL) {
+            Ok(input) => input,
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => break,
+        };
         match input {
             Input::Command {
                 offset,
@@ -367,6 +415,36 @@ fn match_loop(
     }
     report.next_offset = engine.next_offset();
     (report, halted)
+}
+
+fn answer_queries(engine: &Engine, queries: &Receiver<BookQuery>) {
+    loop {
+        match queries.try_recv() {
+            Ok(q) => {
+                // The asker may have given up; that is fine.
+                let _ = q.reply.try_send(book_view(engine, &q.symbol));
+            }
+            Err(TryRecvError::Empty | TryRecvError::Disconnected) => return,
+        }
+    }
+}
+
+/// The book of `symbol` as the matcher holds it right now.
+pub fn book_view(engine: &Engine, symbol: &Symbol) -> BookView {
+    let Some(book) = engine.book(symbol) else {
+        return BookView::default();
+    };
+    let levels = |side| {
+        book.depth(side)
+            .into_iter()
+            .map(|(p, q)| (p.cents(), q.shares()))
+            .collect()
+    };
+    BookView {
+        as_of_seq: book.last_seq(),
+        bids: levels(Side::Buy),
+        asks: levels(Side::Sell),
+    }
 }
 
 fn write_loop(

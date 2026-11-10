@@ -13,6 +13,10 @@ CREATE ROLE settlement LOGIN PASSWORD 'settlement-dev';
 CREATE DATABASE settlement OWNER settlement;
 REVOKE ALL ON DATABASE settlement FROM PUBLIC;
 
+CREATE ROLE market_data LOGIN PASSWORD 'market-data-dev';
+CREATE DATABASE market_data OWNER market_data;
+REVOKE ALL ON DATABASE market_data FROM PUBLIC;
+
 -- The auditor reads every database through this read-only login (spec:
 -- "Auditor"). Default privileges cover the tables each service's
 -- migrations create later.
