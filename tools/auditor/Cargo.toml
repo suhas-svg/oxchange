@@ -1,0 +1,25 @@
+[package]
+name = "auditor"
+description = "Proves the books balance: the spec's 11 auditor rules over every database and matching.events."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+accounts.workspace = true
+prost.workspace = true
+proto-gen.workspace = true
+rdkafka = { workspace = true, optional = true }
+sqlx.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+[features]
+kafka = ["dep:rdkafka"]
+
+[lints]
+workspace = true

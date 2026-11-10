@@ -2,12 +2,17 @@
 resolver = "3"
 members = [
     "crates/auth",
+    "crates/consumer",
     "crates/domain",
     "crates/order-book",
+    "crates/outbox",
     "crates/proto-gen",
     "services/accounts",
     "services/matching",
     "services/order-entry",
+    "services/risk",
+    "services/settlement",
+    "tools/auditor",
     "tools/e2e",
 ]
 
@@ -19,6 +24,13 @@ license = "MIT"
 
 [workspace.dependencies]
 auth = { path = "crates/auth" }
+accounts = { path = "services/accounts" }
+consumer = { path = "crates/consumer" }
+outbox = { path = "crates/outbox" }
+risk = { path = "services/risk" }
+settlement = { path = "services/settlement" }
+auditor = { path = "tools/auditor" }
+fail = "0.5"
 argon2 = "0.5"
 base64 = "0.22"
 ed25519-dalek = { version = "2", features = ["pkcs8", "pem", "rand_core", "std"] }

@@ -10,6 +10,7 @@ dependencies = [
  "auth",
  "axum",
  "domain",
+ "outbox",
  "prost",
  "proto-gen",
  "sha2",
@@ -147,6 +148,21 @@ name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
+
+[[package]]
+name = "auditor"
+version = "0.1.0"
+dependencies = [
+ "accounts",
+ "prost",
+ "proto-gen",
+ "rdkafka",
+ "sqlx",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
 
 [[package]]
 name = "auth"
@@ -499,6 +515,16 @@ name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
+
+[[package]]
+name = "consumer"
+version = "0.1.0"
+dependencies = [
+ "rdkafka",
+ "sqlx",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "core-foundation"
@@ -897,6 +923,17 @@ checksum = "5a23add41df1562121a9393cb065eab5146a1242410f23a644851e90cfd669d2"
 dependencies = [
  "parking",
  "pin-project-lite",
+]
+
+[[package]]
+name = "fail"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe5e43d0f78a42ad591453aedb1d7ae631ce7ee445c7643691055a9ed8d3b01c"
+dependencies = [
+ "log",
+ "once_cell",
+ "rand 0.8.8",
 ]
 
 [[package]]
@@ -2056,6 +2093,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "outbox"
+version = "0.1.0"
+dependencies = [
+ "rdkafka",
+ "serde_json",
+ "sqlx",
+ "testcontainers-modules",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "parking"
 version = "2.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2336,7 +2385,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03da047801ff44bb6a4d407d4860c05fd70bb81714e6b2f3812603d5b145b042"
 dependencies = [
  "heck",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "log",
  "multimap",
  "petgraph",
@@ -2357,7 +2406,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -2686,6 +2735,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "risk"
+version = "0.1.0"
+dependencies = [
+ "accounts",
+ "axum",
+ "consumer",
+ "domain",
+ "fail",
+ "matching",
+ "outbox",
+ "prost",
+ "proto-gen",
+ "sqlx",
+ "testcontainers-modules",
+ "thiserror",
+ "time",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "rsa"
 version = "0.9.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2989,6 +3063,31 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.10",
+]
+
+[[package]]
+name = "settlement"
+version = "0.1.0"
+dependencies = [
+ "accounts",
+ "auditor",
+ "axum",
+ "consumer",
+ "fail",
+ "matching",
+ "outbox",
+ "prost",
+ "proto-gen",
+ "risk",
+ "sqlx",
+ "testcontainers-modules",
+ "time",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

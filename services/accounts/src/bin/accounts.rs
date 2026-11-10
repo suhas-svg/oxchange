@@ -126,6 +126,21 @@ async fn serve() -> Result<(), BoxError> {
         }
     });
 
+    // Outbox relay for accounts.events. Built only with the kafka feature
+    // (as in the Docker image); without it the messages wait in the outbox.
+    #[cfg(feature = "kafka")]
+    {
+        let publisher = outbox::kafka::KafkaPublisher::connect(&env("KAFKA_BROKERS")?)?;
+        tokio::spawn(outbox::run(
+            pool.clone(),
+            publisher,
+            outbox::RelayConfig::new(accounts::OUTBOX_LOCK_KEY),
+            std::future::pending(),
+        ));
+    }
+    #[cfg(not(feature = "kafka"))]
+    tracing::warn!("built without the kafka feature: accounts.events stay in the outbox");
+
     let accounts = Arc::new(Accounts::new(pool, signer));
     tracing::info!(%listen, health = %health_addr, "accounts serving");
     tonic::transport::Server::builder()

@@ -1,7 +1,8 @@
 # Local development stack (spec: "Deployment": Docker Compose for daily
 # development, one Redpanda broker locally).
 #
-#   docker compose up -d --build          # Postgres, Redpanda, Accounts, 4 matchers, order-entry
+#   docker compose up -d --build          # Postgres, Redpanda, Accounts, Risk, Settlement, 4 matchers, order-entry
+#   docker compose run --rm auditor       # the 11 auditor rules (add --traffic-stopped once orders stop)
 #   docker compose run --rm e2e e2e ...   # end-to-end tools
 #   scripts/e2e-restart.sh                # Gate 1 restart check
 name: oxchange
@@ -94,7 +95,7 @@ services:
       - postgres:/var/lib/postgresql/data
       - ./deploy/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d accounts"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d settlement"]
       interval: 2s
       timeout: 5s
       retries: 30
@@ -120,6 +121,7 @@ services:
     environment:
       DATABASE_URL: postgres://accounts:accounts-dev@postgres:5432/accounts
       JWT_PRIVATE_KEY_FILE: /keys/jwt-private.pem
+      KAFKA_BROKERS: redpanda:9092
       RUST_LOG: ${RUST_LOG:-info}
     volumes: ["jwt-keys:/keys:ro"]
     ports:
@@ -131,11 +133,94 @@ services:
         condition: service_completed_successfully
       accounts-migrate:
         condition: service_completed_successfully
+      topics:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "accounts", "health"]
       interval: 2s
       timeout: 3s
       retries: 30
+
+  risk-migrate:
+    image: oxchange:dev
+    command: ["risk", "migrate"]
+    environment:
+      DATABASE_URL: postgres://risk:risk-dev@postgres:5432/risk
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  risk:
+    image: oxchange:dev
+    command: ["risk", "serve"]
+    environment:
+      DATABASE_URL: postgres://risk:risk-dev@postgres:5432/risk
+      ACCOUNTS_GRPC_URL: http://accounts:50051
+      KAFKA_BROKERS: redpanda:9092
+      RUST_LOG: ${RUST_LOG:-info}
+    ports:
+      - "50052:50051"
+    read_only: true
+    restart: on-failure
+    depends_on:
+      risk-migrate:
+        condition: service_completed_successfully
+      topics:
+        condition: service_completed_successfully
+      accounts:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "risk", "health"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  settlement-migrate:
+    image: oxchange:dev
+    command: ["settlement", "migrate"]
+    environment:
+      DATABASE_URL: postgres://settlement:settlement-dev@postgres:5432/settlement
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  settlement:
+    image: oxchange:dev
+    command: ["settlement", "serve"]
+    environment:
+      DATABASE_URL: postgres://settlement:settlement-dev@postgres:5432/settlement
+      ACCOUNTS_GRPC_URL: http://accounts:50051
+      KAFKA_BROKERS: redpanda:9092
+      RUST_LOG: ${RUST_LOG:-info}
+    read_only: true
+    restart: on-failure
+    depends_on:
+      settlement-migrate:
+        condition: service_completed_successfully
+      topics:
+        condition: service_completed_successfully
+      accounts:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "settlement", "health"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # A job, not a service: exits 0 when every rule holds.
+  auditor:
+    image: oxchange:dev
+    profiles: ["tools"]
+    entrypoint: ["auditor"]
+    environment:
+      ACCOUNTS_DATABASE_URL: postgres://auditor:auditor-dev@postgres:5432/accounts
+      RISK_DATABASE_URL: postgres://auditor:auditor-dev@postgres:5432/risk
+      SETTLEMENT_DATABASE_URL: postgres://auditor:auditor-dev@postgres:5432/settlement
+      KAFKA_BROKERS: redpanda:9092
+      RUST_LOG: ${RUST_LOG:-info}
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   # Development stand-in for the Gateway and Risk: no login, no funds checks.
   order-entry:

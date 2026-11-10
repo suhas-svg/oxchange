@@ -1,0 +1,42 @@
+[package]
+name = "risk"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+axum.workspace = true
+consumer.workspace = true
+domain.workspace = true
+fail.workspace = true
+outbox.workspace = true
+prost.workspace = true
+proto-gen.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio.workspace = true
+tonic.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+[[bin]]
+name = "risk"
+required-features = ["kafka"]
+
+[features]
+kafka = ["outbox/kafka", "consumer/kafka"]
+
+[dev-dependencies]
+accounts.workspace = true
+fail = { workspace = true, features = ["failpoints"] }
+matching.workspace = true
+testcontainers-modules.workspace = true
+tokio = { workspace = true, features = ["io-util", "sync"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+
+[lints]
+workspace = true
