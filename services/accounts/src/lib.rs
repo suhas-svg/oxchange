@@ -22,6 +22,8 @@ pub use money::{MAX_TRANSFER_UNITS, USD};
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 pub const ACCOUNTS_EVENTS_TOPIC: &str = "accounts.events";
+/// Advisory lock ID for the Accounts outbox relay ("ACCT" in ASCII).
+pub const OUTBOX_LOCK_KEY: i64 = 0x4143_4354;
 
 /// Failures, each with the spec's API error code.
 #[derive(Debug, thiserror::Error)]
