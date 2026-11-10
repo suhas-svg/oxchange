@@ -6,6 +6,7 @@
 //! - `PARTITION`, or derived from a StatefulSet hostname ending `-<n>`
 //!   (`matching-2` owns partition 2).
 //! - `SNAPSHOT_INTERVAL` (default 100000), `DEDUP_CAPACITY` (default 1000000).
+//! - `GRPC_ADDR` (default `0.0.0.0:50051`) for `MatchingService.GetBook`.
 //! - `RUST_LOG` (default `info`).
 //!
 //! Exits non-zero when it halts, so the orchestrator restarts it and the
@@ -26,6 +27,7 @@ struct Config {
     partition: u32,
     snapshot_interval: u64,
     dedup_capacity: usize,
+    grpc_addr: std::net::SocketAddr,
 }
 
 fn required(name: &str) -> Result<String, String> {
@@ -59,6 +61,7 @@ impl Config {
             partition,
             snapshot_interval: parsed("SNAPSHOT_INTERVAL", snapshot::DEFAULT_SNAPSHOT_INTERVAL)?,
             dedup_capacity: parsed("DEDUP_CAPACITY", DEFAULT_DEDUP_CAPACITY)?,
+            grpc_addr: parsed("GRPC_ADDR", ([0, 0, 0, 0], 50051).into())?,
         })
     }
 }
@@ -112,12 +115,37 @@ fn run() -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     }
 
+    // GetBook runs on its own small async runtime; the matcher answers its
+    // queries between commands.
+    let (queries_tx, queries) = std::sync::mpsc::sync_channel(64);
+    let addr = cfg.grpc_addr;
+    std::thread::Builder::new()
+        .name("matching-grpc".into())
+        .spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("grpc runtime");
+            rt.block_on(async move {
+                tracing::info!(%addr, "GetBook listening");
+                if let Err(e) = tonic::transport::Server::builder()
+                    .add_service(matching::grpc::Service::server(queries_tx))
+                    .serve(addr)
+                    .await
+                {
+                    tracing::error!(error = %e, "GetBook server stopped");
+                }
+            });
+        })
+        .map_err(|e| e.to_string())?;
+
     let config = PipelineConfig {
         snapshot_interval: cfg.snapshot_interval,
         ..PipelineConfig::default()
     };
-    let report = pipeline::run(recovery.engine, source, sink, store, config, stop)
-        .map_err(|e| e.to_string())?;
+    let report =
+        pipeline::run_with_queries(recovery.engine, source, sink, store, config, stop, queries)
+            .map_err(|e| e.to_string())?;
     tracing::info!(?report, "matching engine shut down cleanly");
     Ok(())
 }

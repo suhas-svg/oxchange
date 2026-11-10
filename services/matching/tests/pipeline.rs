@@ -400,3 +400,83 @@ fn stop_flag_shuts_down_cleanly_with_a_final_snapshot() {
     assert_eq!(saved.len(), 1, "only the shutdown snapshot");
     assert_eq!(saved[0].next_offset, report.next_offset);
 }
+
+/// Feeds records slowly, so queries land while commands are flowing.
+struct SlowSource(VecSource, usize);
+
+impl CommandSource for SlowSource {
+    fn fetch(&mut self) -> Result<Fetched, TransportError> {
+        self.1 += 1;
+        if self.1.is_multiple_of(20) {
+            thread::sleep(Duration::from_micros(200));
+        }
+        self.0.fetch()
+    }
+}
+
+/// GetBook's contract: an answer is the book exactly as of `as_of_seq`,
+/// never halfway through a command.
+#[test]
+fn book_queries_are_answered_between_commands() {
+    let recs = records(6_000, 9);
+    let symbol = workload::generate(6_000, 9).symbols[0].clone();
+    // The reference: the book after every event seq of `symbol`.
+    let mut by_seq = HashMap::new();
+    {
+        let mut e = Engine::new(0, CAP);
+        by_seq.insert(0, pipeline::book_view(&e, &symbol));
+        for r in &recs {
+            let (sym, cmd) = matching::codec::decode_command(&r.payload).unwrap();
+            let mut out = Vec::new();
+            e.process(r.offset, &sym, &cmd, &mut out).unwrap();
+            if sym == symbol {
+                let v = pipeline::book_view(&e, &symbol);
+                by_seq.insert(v.as_of_seq, v);
+            }
+        }
+    }
+
+    let (queries_tx, queries) = std::sync::mpsc::sync_channel(4);
+    let runner = thread::spawn(move || {
+        pipeline::run_with_queries(
+            Engine::new(0, CAP),
+            SlowSource(VecSource::new(recs), 0),
+            MemSink::default(),
+            NoPersist,
+            config(1_000_000, false),
+            Arc::new(AtomicBool::new(false)),
+            queries,
+        )
+    });
+    let mut answered = Vec::new();
+    while !runner.is_finished() {
+        let (reply, answer) = std::sync::mpsc::sync_channel(1);
+        if queries_tx
+            .send(pipeline::BookQuery {
+                symbol: symbol.clone(),
+                reply,
+            })
+            .is_err()
+        {
+            break;
+        }
+        if let Ok(v) = answer.recv_timeout(Duration::from_secs(1)) {
+            answered.push(v);
+        }
+    }
+    runner.join().unwrap().unwrap();
+
+    let distinct: std::collections::HashSet<u64> = answered.iter().map(|v| v.as_of_seq).collect();
+    assert!(distinct.len() > 5, "queries only saw {distinct:?}");
+    for v in &answered {
+        assert_eq!(Some(v), by_seq.get(&v.as_of_seq), "seq {}", v.as_of_seq);
+    }
+}
+
+struct NoPersist;
+
+impl SnapshotPersist for NoPersist {
+    fn persist(&mut self, _: &EngineState) -> io::Result<()> {
+        Ok(())
+    }
+}

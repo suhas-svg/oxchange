@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{env, limit, status};
+use common::{env, env_with_prices, limit, status};
 use proto_gen::events::v1 as ev;
 use proto_gen::risk::v1 as pb;
 use risk::RiskError;
@@ -57,14 +57,6 @@ async fn an_order_fills_partly_settles_and_the_rest_is_canceled_and_released() {
     );
     assert_eq!(e.balance(&buyer, "USD").await, (100_000, 0));
     e.audit().await;
-
-    // The last trade is now ACME's reference price.
-    let (last,): (Option<i64>,) =
-        sqlx::query_as("SELECT last_price_cents FROM symbols WHERE symbol = 'ACME'")
-            .fetch_one(e.risk.pool())
-            .await
-            .unwrap();
-    assert_eq!(last, Some(1000));
 }
 
 #[tokio::test]
@@ -146,9 +138,13 @@ async fn checks_run_in_the_spec_order_and_refuse_with_its_codes() {
     assert_eq!(e.pump().await.len(), 0, "a rejected order sends no command");
 }
 
+/// Spec check 5: a market order needs a reference price, which comes from
+/// Market Data's Redis ticker. Without one, market orders are rejected and
+/// limit orders carry on.
 #[tokio::test]
-async fn market_orders_use_a_protected_price_from_the_last_trade_or_listing() {
-    let e = env().await;
+async fn market_orders_use_a_protected_price_from_the_ticker() {
+    let e = env_with_prices().await;
+    let prices = e.prices.clone().unwrap();
     let buyer = e.user("buyer", 100_000, &[]).await;
     let seller = e.user("seller", 0, &[("ACME", 5)]).await;
     e.place(&seller, "s", "ACME", Sell, 1020, 5).await.unwrap();
@@ -159,7 +155,32 @@ async fn market_orders_use_a_protected_price_from_the_last_trade_or_listing() {
         time_in_force: 0,
         ..limit(&buyer, coid, "ACME", Buy, 0, 10)
     };
-    // No trades yet: 5% above ACME's $10.00 listing price.
+    // No trades yet, so no reference price.
+    let r = e.risk.place_order(&market("m0")).await;
+    assert!(matches!(r, Err(RiskError::Unavailable(_))), "{r:?}");
+
+    // A trade at $10.20, which Market Data puts in the ticker.
+    e.place(&buyer, "b", "ACME", Buy, 1020, 1).await.unwrap();
+    let trade = e
+        .pump()
+        .await
+        .into_iter()
+        .find(|x| matches!(x.body, Some(ev::matching_event::Body::Trade(_))))
+        .unwrap();
+    prices
+        .write(
+            "ACME",
+            ticker::Tick {
+                last_price_cents: 1020,
+                day_volume: 1,
+                seq: trade.seq,
+                traded_at_ns: trade.event_time_ns,
+            },
+        )
+        .await
+        .unwrap();
+
+    // 5% above the last trade, and always IOC.
     let o = e
         .risk
         .place_order(&market("m1"))
@@ -167,26 +188,22 @@ async fn market_orders_use_a_protected_price_from_the_last_trade_or_listing() {
         .unwrap()
         .order
         .unwrap();
-    assert_eq!(o.limit_price_cents, 1050);
+    assert_eq!(o.limit_price_cents, 1071);
     assert_eq!(o.time_in_force, ev::TimeInForce::Ioc as i32);
     e.pump().await;
     let o = e.order(&buyer, &o.order_id).await;
-    // 5 filled at $10.20; the other 5 canceled at once (IOC) and released.
+    // 4 filled at $10.20; the other 6 canceled at once (IOC) and released.
     assert_eq!(
         (status(&o), o.filled_quantity, o.canceled_quantity),
-        (S::Canceled, 5, 5)
+        (S::Canceled, 4, 6)
     );
     assert_eq!(e.balance(&buyer, "USD").await, (100_000 - 5 * 1020, 0));
 
-    // Now the reference is the $10.20 trade.
-    let o2 = e
-        .risk
-        .place_order(&market("m2"))
-        .await
-        .unwrap()
-        .order
-        .unwrap();
-    assert_eq!(o2.limit_price_cents, 1071);
+    // Redis is lost: market orders are rejected, limit orders continue.
+    e.redis.as_ref().unwrap().stop().await.unwrap();
+    let r = e.risk.place_order(&market("m2")).await;
+    assert!(matches!(r, Err(RiskError::Unavailable(_))), "{r:?}");
+    e.place(&buyer, "b2", "ACME", Buy, 1000, 1).await.unwrap();
     e.pump().await;
     e.audit().await;
 }

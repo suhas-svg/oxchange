@@ -1,0 +1,45 @@
+[package]
+name = "market-data"
+description = "Oxchange Market Data: the public book, trades, 1-minute candles, and the public WebSocket."
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+axum = { workspace = true, features = ["ws"] }
+consumer.workspace = true
+futures-util.workspace = true
+prost.workspace = true
+proto-gen.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+ticker.workspace = true
+time.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+tonic.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+rdkafka = { workspace = true, optional = true }
+
+[[bin]]
+name = "market-data"
+required-features = ["kafka"]
+
+[features]
+kafka = ["dep:rdkafka", "consumer/kafka"]
+
+[dev-dependencies]
+domain.workspace = true
+matching.workspace = true
+order-book.workspace = true
+redis.workspace = true
+testcontainers-modules.workspace = true
+tokio-tungstenite = "0.26"
+tokio-stream = { version = "0.1", features = ["net"] }
+
+[lints]
+workspace = true

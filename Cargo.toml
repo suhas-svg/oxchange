@@ -7,7 +7,9 @@ members = [
     "crates/order-book",
     "crates/outbox",
     "crates/proto-gen",
+    "crates/ticker",
     "services/accounts",
+    "services/market-data",
     "services/matching",
     "services/order-entry",
     "services/risk",
@@ -30,6 +32,9 @@ outbox = { path = "crates/outbox" }
 risk = { path = "services/risk" }
 settlement = { path = "services/settlement" }
 auditor = { path = "tools/auditor" }
+market-data = { path = "services/market-data" }
+ticker = { path = "crates/ticker" }
+redis = { version = "0.32", default-features = false, features = ["tokio-comp", "connection-manager", "script"] }
 fail = "0.5"
 argon2 = "0.5"
 base64 = "0.22"
@@ -38,7 +43,7 @@ getrandom = "0.3"
 rand_core = { version = "0.6", features = ["getrandom"] }
 sha2 = "0.10"
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "postgres", "migrate", "uuid", "time", "macros"] }
-testcontainers-modules = { version = "0.15", features = ["postgres"] }
+testcontainers-modules = { version = "0.15", features = ["postgres", "redis"] }
 time = "0.3"
 domain = { path = "crates/domain" }
 order-book = { path = "crates/order-book" }
@@ -67,6 +72,7 @@ serde_json = "1"
 ctrlc = { version = "3", features = ["termination"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -1,7 +1,8 @@
 # Local development stack (spec: "Deployment": Docker Compose for daily
 # development, one Redpanda broker locally).
 #
-#   docker compose up -d --build          # Postgres, Redpanda, Accounts, Risk, Settlement, 4 matchers, order-entry
+#   docker compose up -d --build          # Postgres, Redis, Redpanda, Accounts, Risk, Settlement,
+#                                         # Market Data (http://localhost:8090), 4 matchers, order-entry
 #   docker compose run --rm auditor       # the 11 auditor rules (add --traffic-stopped once orders stop)
 #   docker compose run --rm e2e e2e ...   # end-to-end tools
 #   scripts/e2e-restart.sh                # Gate 1 restart check
@@ -95,9 +96,22 @@ services:
       - postgres:/var/lib/postgresql/data
       - ./deploy/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d settlement"]
+      # The last database init.sql creates, so all of them exist.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d market_data"]
       interval: 2s
       timeout: 5s
+      retries: 30
+
+  # Only data that is safe to lose (spec: "Data storage → Redis"), so no volume.
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "16379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
       retries: 30
 
   # Writes the JWT key pair to a volume on first start (never committed).
@@ -157,6 +171,7 @@ services:
       DATABASE_URL: postgres://risk:risk-dev@postgres:5432/risk
       ACCOUNTS_GRPC_URL: http://accounts:50051
       KAFKA_BROKERS: redpanda:9092
+      REDIS_URL: redis://redis:6379
       RUST_LOG: ${RUST_LOG:-info}
     ports:
       - "50052:50051"
@@ -169,6 +184,9 @@ services:
         condition: service_completed_successfully
       accounts:
         condition: service_healthy
+      # Not healthy: Risk runs in reduced mode (no market orders) without it.
+      redis:
+        condition: service_started
     healthcheck:
       test: ["CMD", "risk", "health"]
       interval: 2s
@@ -203,6 +221,43 @@ services:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "settlement", "health"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  market-data-migrate:
+    image: oxchange:dev
+    command: ["market-data", "migrate"]
+    environment:
+      DATABASE_URL: postgres://market_data:market-data-dev@postgres:5432/market_data
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # REST for book, trades and candles, and /ws/public. Host port 8090,
+  # because 8080 belongs to order-entry.
+  market-data:
+    image: oxchange:dev
+    command: ["market-data", "serve"]
+    environment:
+      DATABASE_URL: postgres://market_data:market-data-dev@postgres:5432/market_data
+      KAFKA_BROKERS: redpanda:9092
+      REDIS_URL: redis://redis:6379
+      MATCHING_GRPC_URLS: http://matching-0:50051,http://matching-1:50051,http://matching-2:50051,http://matching-3:50051
+      RUST_LOG: ${RUST_LOG:-info}
+    ports:
+      - "8090:8080"
+    read_only: true
+    restart: on-failure
+    depends_on:
+      market-data-migrate:
+        condition: service_completed_successfully
+      topics:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "market-data", "health"]
       interval: 2s
       timeout: 3s
       retries: 30
