@@ -1,0 +1,147 @@
+{{- /*
+The six stateless services. Each gets a Deployment, a Service when it
+listens for requests, and a PodDisruptionBudget when it has two or more
+copies. What differs between them is listed in $apps and in one
+"oxchange.env.<name>" block each.
+*/ -}}
+
+{{- define "oxchange.env.accounts" -}}
+- name: JWT_PRIVATE_KEY
+  valueFrom:
+    secretKeyRef: { name: {{ include "oxchange.jwtSecret" . }}, key: jwt-private.pem }
+- { name: KAFKA_BROKERS, value: {{ include "oxchange.kafkaBrokers" . | quote }} }
+{{- end }}
+
+{{- define "oxchange.env.risk" -}}
+- { name: ACCOUNTS_GRPC_URL, value: "http://accounts:50051" }
+- { name: KAFKA_BROKERS, value: {{ include "oxchange.kafkaBrokers" . | quote }} }
+- { name: REDIS_URL, value: "redis://redis:6379" }
+{{- end }}
+
+{{- define "oxchange.env.settlement" -}}
+- { name: ACCOUNTS_GRPC_URL, value: "http://accounts:50051" }
+- { name: KAFKA_BROKERS, value: {{ include "oxchange.kafkaBrokers" . | quote }} }
+{{- end }}
+
+{{- define "oxchange.env.market-data" -}}
+- { name: KAFKA_BROKERS, value: {{ include "oxchange.kafkaBrokers" . | quote }} }
+- { name: REDIS_URL, value: "redis://redis:6379" }
+- { name: MATCHING_GRPC_URLS, value: {{ include "oxchange.matchingUrls" . | quote }} }
+{{- end }}
+
+{{- define "oxchange.env.notifications" -}}
+- { name: KAFKA_BROKERS, value: {{ include "oxchange.kafkaBrokers" . | quote }} }
+- { name: REDIS_URL, value: "redis://redis:6379" }
+{{- end }}
+
+{{- define "oxchange.env.gateway" -}}
+- { name: ACCOUNTS_GRPC_URL, value: "http://accounts:50051" }
+- { name: RISK_GRPC_URL, value: "http://risk:50051" }
+- { name: MARKET_DATA_URL, value: "http://market-data:8080" }
+- { name: NOTIFICATIONS_URL, value: "http://notifications:8080" }
+- { name: REDIS_URL, value: "redis://redis:6379" }
+- name: JWT_PUBLIC_KEY
+  valueFrom:
+    secretKeyRef: { name: {{ include "oxchange.jwtSecret" . }}, key: jwt-public.pem }
+# Only the web server can reach the Gateway (its Service is cluster-internal),
+# and the web server replaces X-Forwarded-For with the address it saw.
+- { name: TRUST_FORWARDED_FOR, value: "true" }
+{{- end }}
+
+{{- $root := . }}
+{{- /* name, copies, database login (also the database name), request port, and the port with /healthz and /readyz */ -}}
+{{- $apps := list
+  (dict "name" "accounts"      "replicas" .Values.replicas.accounts      "db" "accounts"      "port" (dict "name" "grpc" "number" 50051) "health" 8081)
+  (dict "name" "risk"          "replicas" .Values.replicas.risk          "db" "risk"          "port" (dict "name" "grpc" "number" 50051) "health" 8081)
+  (dict "name" "settlement"    "replicas" .Values.replicas.settlement    "db" "settlement"                                               "health" 8081)
+  (dict "name" "market-data"   "replicas" .Values.replicas.marketData    "db" "market_data"   "port" (dict "name" "http" "number" 8080)  "health" 8080)
+  (dict "name" "notifications" "replicas" .Values.replicas.notifications "db" "notifications" "port" (dict "name" "http" "number" 8080)  "health" 8080)
+  (dict "name" "gateway"       "replicas" .Values.replicas.gateway                            "port" (dict "name" "http" "number" 8080)  "health" 8080)
+}}
+{{- range $app := $apps }}
+{{- if $app.port }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $app.name }}
+  labels: {{- include "oxchange.labels" $root | nindent 4 }}
+spec:
+  selector: { app.kubernetes.io/name: {{ $app.name }} }
+  ports:
+    - { name: {{ $app.port.name }}, port: {{ $app.port.number }} }
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $app.name }}
+  labels: {{- include "oxchange.labels" $root | nindent 4 }}
+spec:
+  replicas: {{ $app.replicas }}
+  selector:
+    matchLabels: { app.kubernetes.io/name: {{ $app.name }} }
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ $app.name }}
+        {{- include "oxchange.labels" $root | nindent 8 }}
+    spec:
+      {{- include "oxchange.podSecurity" $root | nindent 6 }}
+      # Spec: on SIGTERM a service exits within 25 seconds.
+      terminationGracePeriodSeconds: 30
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app.kubernetes.io/name: {{ $app.name }} }
+      {{- if $app.db }}
+      initContainers:
+        # Holds the service back until its tables exist. The migration Job
+        # normally got there first, and then this finds nothing to do;
+        # either way, migrations take a database lock, so they never run
+        # twice at once.
+        - name: wait-for-schema
+          image: {{ include "oxchange.image" $root }}
+          imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+          command: [{{ $app.name | quote }}, "migrate"]
+          {{- include "oxchange.containerSecurity" $root | nindent 10 }}
+          env:
+            {{- include "oxchange.databaseEnv" (list "DATABASE_URL" $app.db $app.db) | nindent 12 }}
+            - { name: RUST_LOG, value: {{ $root.Values.logLevel | quote }} }
+      {{- end }}
+      containers:
+        - name: {{ $app.name }}
+          image: {{ include "oxchange.image" $root }}
+          imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+          command: [{{ $app.name | quote }}, "serve"]
+          {{- include "oxchange.containerSecurity" $root | nindent 10 }}
+          env:
+            {{- if $app.db }}
+            {{- include "oxchange.databaseEnv" (list "DATABASE_URL" $app.db $app.db) | nindent 12 }}
+            {{- end }}
+            {{- include (printf "oxchange.env.%s" $app.name) $root | nindent 12 }}
+            - { name: RUST_LOG, value: {{ $root.Values.logLevel | quote }} }
+          ports:
+            {{- if $app.port }}
+            - { name: {{ $app.port.name }}, containerPort: {{ $app.port.number }} }
+            {{- end }}
+            {{- if or (not $app.port) (ne (int $app.port.number) (int $app.health)) }}
+            - { name: health, containerPort: {{ $app.health }} }
+            {{- end }}
+          {{- include "oxchange.probes" $app.health | nindent 10 }}
+          resources: {{- toYaml $root.Values.resources | nindent 12 }}
+{{- if gt (int $app.replicas) 1 }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $app.name }}
+  labels: {{- include "oxchange.labels" $root | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: {{ $app.name }} }
+{{- end }}
+{{- end }}

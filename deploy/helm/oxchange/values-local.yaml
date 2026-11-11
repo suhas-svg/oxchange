@@ -1,0 +1,30 @@
+# A single-node laptop cluster (k3d), as scripts/k8s.sh up creates it:
+# locally built images, small CPU requests, and the dashboard on a NodePort
+# that k3d maps to http://localhost:3000.
+
+image:
+  repository: oxchange
+  tag: dev
+  pullPolicy: Never
+
+web:
+  image:
+    repository: oxchange-web
+    tag: dev
+  service:
+    type: NodePort
+    nodePort: 30080
+
+matching:
+  # Four whole cores would be a third of a typical laptop.
+  resources:
+    requests: { cpu: 100m, memory: 64Mi }
+    limits: { cpu: "1", memory: 256Mi }
+
+jwt:
+  existingSecret: oxchange-jwt
+
+postgres:
+  storage: 2Gi
+redpanda:
+  storage: 2Gi

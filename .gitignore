@@ -1,3 +1,7 @@
 /target
 *.snap.tmp
 .env
+
+# Local cluster files written by scripts/k8s-up.sh (kubeconfig, JWT keys)
+/.k8s/
+__pycache__/

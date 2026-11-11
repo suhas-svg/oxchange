@@ -94,13 +94,23 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_PASSWORD: postgres
+      # Local development passwords only; the cluster generates its own
+      # (see deploy/helm/oxchange). The init script reads these once, when
+      # the data volume is first created.
+      ACCOUNTS_DB_PASSWORD: accounts-dev
+      RISK_DB_PASSWORD: risk-dev
+      SETTLEMENT_DB_PASSWORD: settlement-dev
+      MARKET_DATA_DB_PASSWORD: market-data-dev
+      NOTIFICATIONS_DB_PASSWORD: notifications-dev
+      AUDITOR_DB_PASSWORD: auditor-dev
     ports:
       - "15432:5432"
     volumes:
       - postgres:/var/lib/postgresql/data
-      - ./deploy/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./deploy/helm/oxchange/files/postgres-init.sh:/docker-entrypoint-initdb.d/init.sh:ro
+      - ./deploy/helm/oxchange/files/postgres-init.sql:/init/postgres-init.sql:ro
     healthcheck:
-      # The last database init.sql creates, so all of them exist.
+      # The last database the init script creates, so all of them exist.
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d notifications"]
       interval: 2s
       timeout: 5s
@@ -317,8 +327,7 @@ services:
       postgres:
         condition: service_healthy
 
-  # Development stand-in for the Gateway and Risk: no login, no funds checks.
-  # The only service browsers talk to. Host port 8000.
+  # The only service browsers talk to (through the web server below).
   gateway:
     image: oxchange:dev
     command: ["gateway", "serve"]
@@ -358,7 +367,8 @@ services:
     ports:
       - "3000:8080"
     read_only: true
-    tmpfs: ["/tmp"]
+    # nginx (uid 101) renders its config into conf.d at start.
+    tmpfs: ["/tmp", "/etc/nginx/conf.d:uid=101,gid=101"]
     restart: on-failure
     depends_on:
       gateway:
