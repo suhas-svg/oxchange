@@ -1,0 +1,13 @@
+# cargo-audit reads every crate in Cargo.lock, including optional ones
+# that are never built. cargo deny (deny.toml) checks the crates the build
+# actually uses, so it does not need these ignores.
+
+[advisories]
+ignore = [
+    # rsa (Marvin timing attack) and libsqlite3-sys: both are in Cargo.lock
+    # only because sqlx's macros list the MySQL and SQLite backends as
+    # optional dependencies. Oxchange enables Postgres only, so neither is
+    # compiled (`cargo tree -i rsa --all-features` prints nothing).
+    "RUSTSEC-2023-0071",
+    "RUSTSEC-2026-0459",
+]
