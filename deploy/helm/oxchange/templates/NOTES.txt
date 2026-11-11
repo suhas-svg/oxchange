@@ -1,0 +1,17 @@
+Oxchange is starting in namespace "{{ .Release.Namespace }}".
+
+Watch it come up (matchers are ready once replay finishes):
+  kubectl -n {{ .Release.Namespace }} get pods -w
+
+Open the dashboard:
+{{- if .Values.ingress.enabled }}
+  http://{{ .Values.ingress.host | default "<your ingress address>" }}/
+{{- else if eq .Values.web.service.type "NodePort" }}
+  http://localhost:3000/   (the port mapping scripts/k8s.sh sets up)
+{{- else }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/web 3000:80
+  then http://localhost:3000/
+{{- end }}
+
+Run the auditor now, without waiting for its 5-minute schedule:
+  kubectl -n {{ .Release.Namespace }} create job --from=cronjob/auditor auditor-now

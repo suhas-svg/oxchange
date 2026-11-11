@@ -1,0 +1,7 @@
+apiVersion: v2
+name: oxchange
+description: The Oxchange simulated stock exchange, with the PostgreSQL, Redpanda and Redis it needs.
+type: application
+version: 0.1.0
+# Image tag used when image.tag is not set. CI deploys with the commit hash.
+appVersion: "dev"

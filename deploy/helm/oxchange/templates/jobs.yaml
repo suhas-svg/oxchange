@@ -1,0 +1,76 @@
+{{- $root := . }}
+{{- /*
+One migration Job per service with a database, run once per release (the
+revision is in the name because the spec of a Job cannot be edited). They
+retry until PostgreSQL is up.
+*/ -}}
+{{- range $svc, $db := dict "accounts" "accounts" "risk" "risk" "settlement" "settlement" "market-data" "market_data" "notifications" "notifications" }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $svc }}-migrate-{{ $root.Release.Revision }}
+  labels: {{- include "oxchange.labels" $root | nindent 4 }}
+spec:
+  backoffLimit: 20
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ $svc }}-migrate
+        {{- include "oxchange.labels" $root | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      {{- include "oxchange.podSecurity" $root | nindent 6 }}
+      containers:
+        - name: migrate
+          image: {{ include "oxchange.image" $root }}
+          imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+          command: [{{ $svc | quote }}, "migrate"]
+          {{- include "oxchange.containerSecurity" $root | nindent 10 }}
+          env:
+            {{- include "oxchange.databaseEnv" (list "DATABASE_URL" $db $db) | nindent 12 }}
+            - { name: RUST_LOG, value: {{ $root.Values.logLevel | quote }} }
+{{- end }}
+---
+# The auditor is a job, not a service: it exits 0 when every rule holds. On
+# this schedule it checks the rules that hold at any moment; the rest need
+# traffic to stop (scripts/k8s.sh audit --traffic-stopped).
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: auditor
+  labels: {{- include "oxchange.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.auditor.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      # A failed rule is a finding to look at, not something a retry fixes.
+      backoffLimit: 0
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: auditor
+            {{- include "oxchange.labels" . | nindent 12 }}
+        spec:
+          restartPolicy: Never
+          {{- include "oxchange.podSecurity" . | nindent 10 }}
+          containers:
+            - name: auditor
+              image: {{ include "oxchange.image" . }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command: ["auditor"]
+              {{- include "oxchange.containerSecurity" . | nindent 14 }}
+              env:
+                # The read-only login, for each database it checks.
+                - name: AUDITOR_PASSWORD
+                  valueFrom:
+                    secretKeyRef: { name: oxchange-db, key: auditor }
+                - { name: ACCOUNTS_DATABASE_URL, value: "postgres://auditor:$(AUDITOR_PASSWORD)@postgres:5432/accounts" }
+                - { name: RISK_DATABASE_URL, value: "postgres://auditor:$(AUDITOR_PASSWORD)@postgres:5432/risk" }
+                - { name: SETTLEMENT_DATABASE_URL, value: "postgres://auditor:$(AUDITOR_PASSWORD)@postgres:5432/settlement" }
+                - { name: KAFKA_BROKERS, value: {{ include "oxchange.kafkaBrokers" . | quote }} }
+                - { name: RUST_LOG, value: {{ .Values.logLevel | quote }} }

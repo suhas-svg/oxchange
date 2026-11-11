@@ -1,0 +1,185 @@
+# The checks from the spec's "Deployment → Continuous integration".
+#
+# Every pull request: formatting, lints, tests, contract checks, dependency
+# checks, the dashboard's own checks, and the Helm chart. Then the images
+# are built and the whole system is deployed into a throwaway Kubernetes
+# cluster inside the runner, traded on once, and audited.
+#
+# A push to master does the same and also publishes the images, tagged with
+# the commit hash.
+#
+# Not here: the spec's "sqlx checks that SQL queries match the migrations".
+# The services use runtime queries, which the database tests exercise
+# against real PostgreSQL instead.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: "1.90"
+
+jobs:
+  lint:
+    name: Format and lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lint
+      - run: cargo fmt --all --check
+      # All features, so the Kafka code (which builds librdkafka) is linted too.
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+      # Unit, property, determinism and snapshot tests, plus the database
+      # and service tests, which start PostgreSQL and Redis in Docker.
+      - run: cargo test --workspace
+
+  contracts:
+    name: Protobuf contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: bufbuild/buf-action@v1
+        with:
+          setup_only: true
+      - run: buf lint
+      - name: buf breaking (against master)
+        if: github.event_name == 'pull_request'
+        run: buf breaking --against "https://github.com/${{ github.repository }}.git#branch=master"
+
+  dependencies:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit,cargo-deny
+      - run: cargo audit
+      - run: cargo deny check
+
+  web:
+    name: Dashboard
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm test
+      - run: npx vite build
+
+  chart:
+    name: Helm chart
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - run: helm lint deploy/helm/oxchange -f deploy/helm/oxchange/values-local.yaml
+      - name: Render and validate (default, local and three-broker values)
+        run: |
+          set -euo pipefail
+          chart=deploy/helm/oxchange
+          validate() { docker run --rm -i ghcr.io/yannh/kubeconform:v0.6.7 -strict -summary -kubernetes-version 1.31.0 -; }
+          helm template oxchange "$chart" --set jwt.existingSecret=oxchange-jwt | validate
+          helm template oxchange "$chart" -f "$chart/values-local.yaml" | validate
+          helm template oxchange "$chart" --set jwt.existingSecret=oxchange-jwt --set redpanda.replicas=3 \
+            --set ingress.enabled=true --set ingress.host=oxchange.example.test | validate
+
+  deploy:
+    name: Build images and deploy to a test cluster
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs: [lint, chart]
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/oxchange:${{ github.sha }}
+      WEB_IMAGE: ghcr.io/${{ github.repository_owner }}/oxchange-web:${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the service image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile
+          tags: ${{ env.IMAGE }}
+          load: true
+          cache-from: type=gha,scope=services
+          cache-to: type=gha,scope=services,mode=max
+      - name: Build the dashboard image
+        uses: docker/build-push-action@v6
+        with:
+          context: web
+          tags: ${{ env.WEB_IMAGE }}
+          load: true
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,scope=web,mode=max
+
+      # The test cluster: k3d inside this runner, installed through the
+      # same script and chart a developer uses.
+      - uses: azure/setup-helm@v4
+      - name: Deploy with Helm
+        run: SKIP_BUILD=1 scripts/k8s.sh up
+      - name: Trade once, end to end
+        run: scripts/k8s.sh smoke
+      - name: Auditor, all 11 rules
+        run: scripts/k8s.sh audit --traffic-stopped
+      - name: Cluster state and logs (on failure)
+        if: failure()
+        run: |
+          export KUBECONFIG=$PWD/.k8s/kubeconfig
+          kubectl -n oxchange get pods,jobs -o wide || true
+          kubectl -n oxchange get events --sort-by=.lastTimestamp | tail -60 || true
+          for p in $(kubectl -n oxchange get pods -o name); do
+            echo "::group::$p"; kubectl -n oxchange logs "$p" --all-containers --tail=80 || true; echo "::endgroup::"
+          done
+
+      - name: Publish the images
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker push "$IMAGE"
+          docker push "$WEB_IMAGE"

@@ -1,4 +1,12 @@
 # Static files for the dashboard, and /v1 + /ws forwarded to the Gateway.
+#
+# The image's entrypoint fills in two values at start (envsubst only
+# touches names that are set in the environment, so nginx's own $variables
+# are left alone):
+#   GATEWAY_URL            where the Gateway is (Compose: http://gateway:8080;
+#                          Kubernetes: the Service's full DNS name)
+#   NGINX_LOCAL_RESOLVERS  the container's DNS servers, read from
+#                          /etc/resolv.conf (Docker's or the cluster's)
 
 map $http_upgrade $connection_upgrade {
   default upgrade;
@@ -8,12 +16,12 @@ map $http_upgrade $connection_upgrade {
 server {
   listen 8080;
   server_tokens off;
-
-  # Look the Gateway up through Docker's DNS on each request (cached 10 s),
-  # so a recreated or rescaled Gateway is found without restarting nginx.
-  resolver 127.0.0.11 valid=10s ipv6=off;
-  set $gateway http://gateway:8080;
   root /usr/share/nginx/html;
+
+  # Look the Gateway up on each request (cached 10 s), so a recreated or
+  # rescaled Gateway is found without restarting nginx.
+  resolver ${NGINX_LOCAL_RESOLVERS} valid=10s ipv6=off;
+  set $gateway ${GATEWAY_URL};
 
   # Inline style attributes come from React (bar widths); no inline scripts.
   add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' ws: wss:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" always;

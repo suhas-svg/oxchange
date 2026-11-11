@@ -1,0 +1,134 @@
+{{- $ns := .Release.Namespace }}
+{{- $n := int .Values.redpanda.replicas }}
+# The Kafka-compatible broker: one copy normally, three for the broker-loss
+# test (spec: "Deployment").
+apiVersion: v1
+kind: Service
+metadata:
+  name: redpanda
+  labels: {{- include "oxchange.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  # Brokers must find each other before any of them is ready.
+  publishNotReadyAddresses: true
+  selector: { app.kubernetes.io/name: redpanda }
+  ports:
+    - { name: kafka, port: 9092 }
+    - { name: rpc, port: 33145 }
+    - { name: admin, port: 9644 }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redpanda
+  labels: {{- include "oxchange.labels" . | nindent 4 }}
+spec:
+  serviceName: redpanda
+  replicas: {{ $n }}
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels: { app.kubernetes.io/name: redpanda }
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: redpanda
+        {{- include "oxchange.labels" . | nindent 8 }}
+    spec:
+      securityContext:
+        # The redpanda user in the image.
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        fsGroup: 101
+        seccompProfile: { type: RuntimeDefault }
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: redpanda
+          image: {{ .Values.redpanda.image }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              # redpanda-2 is node 2 and advertises its own stable DNS name.
+              self="${HOSTNAME}.redpanda.{{ $ns }}.svc.cluster.local"
+              exec rpk redpanda start \
+                --mode=dev-container \
+                --smp={{ .Values.redpanda.cores }} \
+                --memory={{ .Values.redpanda.memory }} \
+                --node-id="${HOSTNAME##*-}" \
+                --kafka-addr=0.0.0.0:9092 \
+                --advertise-kafka-addr="${self}:9092" \
+                --rpc-addr=0.0.0.0:33145 \
+                --advertise-rpc-addr="${self}:33145" \
+                --seeds={{ range $i := until $n }}{{ if $i }},{{ end }}redpanda-{{ $i }}.redpanda.{{ $ns }}.svc.cluster.local:33145{{ end }} \
+                --default-log-level=warn
+          ports:
+            - { name: kafka, containerPort: 9092 }
+            - { name: rpc, containerPort: 33145 }
+            - { name: admin, containerPort: 9644 }
+          startupProbe:
+            tcpSocket: { port: kafka }
+            periodSeconds: 2
+            failureThreshold: 90
+          readinessProbe:
+            exec:
+              command: ["/bin/bash", "-c", "rpk cluster health | grep -E 'Healthy:.+true'"]
+            periodSeconds: 5
+            timeoutSeconds: 5
+          livenessProbe:
+            tcpSocket: { port: admin }
+            periodSeconds: 10
+          resources: {{- toYaml .Values.redpanda.resources | nindent 12 }}
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/redpanda/data }
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests: { storage: {{ .Values.redpanda.storage }} }
+---
+# Creates the topics from the spec's "Messaging → Topics" table. Safe to
+# rerun, so each release gets a fresh Job (the spec of a Job cannot be edited).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: topics-{{ .Release.Revision }}
+  labels: {{- include "oxchange.labels" . | nindent 4 }}
+spec:
+  backoffLimit: 20
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: topics
+        {{- include "oxchange.labels" . | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: topics
+          image: {{ .Values.redpanda.image }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+              B="-X brokers={{ include "oxchange.kafkaBrokers" . }}"
+              create() { rpk topic create "$@" $B || rpk topic describe "$1" $B >/dev/null; }
+              for t in orders.commands matching.events settlement.events accounts.events; do
+                create "$t" -p {{ .Values.matching.partitions }} -r {{ min 3 $n }} -c retention.ms=604800000
+              done
+              for t in orders.commands matching.events settlement.events accounts.events; do
+                create "$t.dlq" -p 1 -r {{ min 3 $n }} -c retention.ms=2592000000
+              done
+              rpk topic list $B

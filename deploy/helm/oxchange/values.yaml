@@ -1,0 +1,96 @@
+# Defaults follow the spec's "Deployment → Kubernetes workloads" table.
+# values-local.yaml shrinks them for a laptop cluster.
+
+image:
+  # One image holds every service binary; each workload picks its command.
+  repository: ghcr.io/suhas-svg/oxchange
+  # Defaults to the chart's appVersion. CI sets the Git commit hash.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+logLevel: info
+
+# Copies of each stateless service. Two or more also get a
+# PodDisruptionBudget that keeps one running during planned maintenance.
+replicas:
+  gateway: 2
+  accounts: 2
+  risk: 2
+  settlement: 2
+  marketData: 2
+  notifications: 2
+
+# Resources for each stateless service pod.
+resources:
+  requests: { cpu: 50m, memory: 64Mi }
+  limits: { memory: 256Mi }
+
+matching:
+  # One pod per partition of orders.commands: matching-2 owns partition 2.
+  # Must equal the topics' partition count below.
+  partitions: 4
+  snapshotInterval: 100000
+  # Snapshot disk per matcher.
+  storage: 1Gi
+  # Equal whole-core requests and limits put the pod in the Guaranteed
+  # class, so with the kubelet's static CPU manager each matcher gets a
+  # core to itself (spec: "whole CPU cores reserved").
+  resources:
+    requests: { cpu: "1", memory: 256Mi }
+    limits: { cpu: "1", memory: 256Mi }
+
+web:
+  image:
+    repository: ghcr.io/suhas-svg/oxchange-web
+    tag: ""
+  replicas: 2
+  service:
+    type: ClusterIP
+    # Only used when type is NodePort.
+    nodePort: null
+
+# Public entry to the dashboard (which forwards /v1 and /ws to the Gateway).
+ingress:
+  enabled: false
+  className: ""
+  host: ""
+
+auditor:
+  # The rules that hold at any moment, every 5 minutes. The rules that need
+  # traffic to stop are run by hand (scripts/k8s.sh audit --traffic-stopped).
+  schedule: "*/5 * * * *"
+
+# The Ed25519 key pair that signs logins. Accounts gets the private key and
+# the Gateway the public one. Either name a Secret you created, with keys
+# jwt-private.pem and jwt-public.pem, or pass both PEM files with
+# --set-file (scripts/k8s.sh up does the first).
+jwt:
+  existingSecret: ""
+  privateKeyPem: ""
+  publicKeyPem: ""
+
+postgres:
+  image: postgres:16-alpine
+  storage: 5Gi
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { memory: 1Gi }
+
+redis:
+  image: redis:7-alpine
+  resources:
+    requests: { cpu: 20m, memory: 32Mi }
+    limits: { memory: 128Mi }
+
+redpanda:
+  image: redpandadata/redpanda:v24.2.7
+  # 1 normally; 3 for the broker-loss test. Topics get a replication factor
+  # of min(3, replicas).
+  replicas: 1
+  storage: 5Gi
+  # Passed to redpanda as --smp and --memory.
+  cores: 1
+  memory: 1G
+  resources:
+    requests: { cpu: 200m, memory: 1Gi }
+    limits: { memory: 1536Mi }

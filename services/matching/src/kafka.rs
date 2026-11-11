@@ -6,6 +6,7 @@
 //! - [`KafkaSink`] writes `matching.events` to the *same partition number*
 //!   (partition mirroring) with `acks=all` and `enable.idempotence=true`.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -42,6 +43,8 @@ pub struct KafkaSource {
     replay_until: u64,
     replay_started: Instant,
     replay_done: bool,
+    /// Shared with the health endpoint: true once replay is done.
+    ready: Arc<AtomicBool>,
 }
 
 impl KafkaSource {
@@ -51,11 +54,14 @@ impl KafkaSource {
     ///
     /// `process_started` is when the process began, so the "ready" log line
     /// reports the full restart-to-ready time the spec targets (under 10 s).
+    /// `ready` is set once every command that was in the log at startup has
+    /// been read (spec: "A matcher reports ready only after replay finishes").
     pub fn connect(
         brokers: &str,
         partition: u32,
         next_offset: u64,
         process_started: Instant,
+        ready: Arc<AtomicBool>,
     ) -> Result<Self, TransportError> {
         let consumer: BaseConsumer = ClientConfig::new()
             .set("bootstrap.servers", brokers)
@@ -104,9 +110,11 @@ impl KafkaSource {
             replay_until: high,
             replay_started: process_started,
             replay_done: next_offset >= high,
+            ready,
         })
         .inspect(|s| {
             if s.replay_done {
+                s.ready.store(true, Ordering::Relaxed);
                 tracing::info!(
                     recovery_ms = process_started.elapsed().as_millis() as u64,
                     "nothing to replay; matcher is ready"
@@ -125,6 +133,7 @@ impl CommandSource for KafkaSource {
         let offset = msg.offset() as u64;
         if !self.replay_done && offset + 1 >= self.replay_until {
             self.replay_done = true;
+            self.ready.store(true, Ordering::Relaxed);
             tracing::info!(
                 recovery_ms = self.replay_started.elapsed().as_millis() as u64,
                 "replay complete; matcher is ready"

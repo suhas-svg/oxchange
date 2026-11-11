@@ -1,0 +1,71 @@
+# The matching engine: one pod per partition. A pod takes its partition from
+# its own name (matching-2 owns partition 2), never from Kafka consumer-group
+# rebalancing, which could briefly hand one partition to two engines.
+apiVersion: v1
+kind: Service
+metadata:
+  name: matching
+  labels: {{- include "oxchange.labels" . | nindent 4 }}
+spec:
+  # Headless: Market Data asks a specific matcher (matching-2.matching) for
+  # its book. A matcher that is still replaying is not listed.
+  clusterIP: None
+  selector: { app.kubernetes.io/name: matching }
+  ports:
+    - { name: grpc, port: 50051 }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: matching
+  labels: {{- include "oxchange.labels" . | nindent 4 }}
+spec:
+  serviceName: matching
+  replicas: {{ .Values.matching.partitions }}
+  # Partitions are independent, so start and restart them together.
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels: { app.kubernetes.io/name: matching }
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: matching
+        {{- include "oxchange.labels" . | nindent 8 }}
+    spec:
+      {{- include "oxchange.podSecurity" . | nindent 6 }}
+      # The spec's shutdown budget is 25 s; leave room before SIGKILL.
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: matching
+          image: {{ include "oxchange.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["matching"]
+          {{- include "oxchange.containerSecurity" . | nindent 10 }}
+          env:
+            - { name: KAFKA_BROKERS, value: {{ include "oxchange.kafkaBrokers" . | quote }} }
+            - { name: SNAPSHOT_DIR, value: /var/lib/matching }
+            - { name: SNAPSHOT_INTERVAL, value: {{ .Values.matching.snapshotInterval | quote }} }
+            - { name: RUST_LOG, value: {{ .Values.logLevel | quote }} }
+          ports:
+            - { name: grpc, containerPort: 50051 }
+            - { name: health, containerPort: 8081 }
+          # No startup probe: /healthz answers from the first moment, and
+          # /readyz turns 200 only once replay has finished.
+          livenessProbe:
+            httpGet: { path: /healthz, port: health }
+            periodSeconds: 10
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet: { path: /readyz, port: health }
+            periodSeconds: 2
+            timeoutSeconds: 3
+          resources: {{- toYaml .Values.matching.resources | nindent 12 }}
+          volumeMounts:
+            - { name: snapshots, mountPath: /var/lib/matching }
+  volumeClaimTemplates:
+    - metadata:
+        name: snapshots
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests: { storage: {{ .Values.matching.storage }} }
