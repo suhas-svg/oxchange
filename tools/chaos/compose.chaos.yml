@@ -1,0 +1,146 @@
+# Overlay for the failure tests (tools/chaos/chaos.py). Adds what the spec's
+# failure table needs on top of docker-compose.yml:
+# - Toxiproxy between Risk and Accounts ("Lost reservation reply", "Slow
+#   Accounts"); its API is on 127.0.0.1:8474.
+# - Three Redpanda brokers with every topic replicated three ways ("Broker
+#   loss"). Clients bootstrap from `redpanda`; the test kills another broker.
+# - Crash points that the runner turns on per scenario (RISK_FAILPOINTS,
+#   SETTLEMENT_FAILPOINTS, MATCHING_FAILPOINTS), and frequent matcher snapshots so restarts recover
+#   from a snapshot plus a replay.
+#
+#   docker compose -f docker-compose.yml -f tools/chaos/compose.chaos.yml up -d --wait
+name: oxchange
+
+services:
+  # Laptop concession, stated in every report: Docker Desktop's disk on the
+  # machine these tests were written on manages about 20 flushes a second,
+  # which caps the whole stack near 20 orders/s with half of them timing out.
+  # No scenario here crashes PostgreSQL or the machine, so not waiting for
+  # each commit to reach disk changes nothing the tests check: commits stay
+  # atomic and visible, and only a PostgreSQL crash could lose the last
+  # fraction of a second. Set CHAOS_SYNC_COMMIT=on to test with full durability.
+  #
+  # The same machine's virtual disk also stops completing writes for 10 to
+  # 18 s at a time, even with nothing running. A table file that grows
+  # during one of those pauses freezes every service that writes, which
+  # would show up as failures in whichever scenario was running. So the
+  # data lives in memory here. It is gone once PostgreSQL stops, and no
+  # scenario stops it.
+  postgres:
+    command:
+      - postgres
+      - -c
+      - synchronous_commit=${CHAOS_SYNC_COMMIT:-off}
+      - -c
+      - max_wal_size=256MB
+    tmpfs: ["/var/lib/postgresql/data:size=2g"]
+    volumes: !override
+      - ./deploy/helm/oxchange/files/postgres-init.sh:/docker-entrypoint-initdb.d/init.sh:ro
+      - ./deploy/helm/oxchange/files/postgres-init.sql:/init/postgres-init.sql:ro
+
+  redpanda:
+    command:
+      - redpanda
+      - start
+      - --mode=dev-container
+      - --smp=1
+      - --memory=700M
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
+      - --rpc-addr=0.0.0.0:33145
+      - --advertise-rpc-addr=redpanda:33145
+      - --default-log-level=warn
+    healthcheck:
+      # Healthy once all three brokers have joined.
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true' && [ $$(rpk cluster info | grep -cE '^[0-9]+\\*? ') -ge 3 ]"]
+      interval: 2s
+      timeout: 5s
+      retries: 90
+
+  redpanda-1: &broker
+    image: redpandadata/redpanda:v24.2.7
+    command:
+      - redpanda
+      - start
+      - --mode=dev-container
+      - --smp=1
+      - --memory=700M
+      - --kafka-addr=internal://0.0.0.0:9092
+      - --advertise-kafka-addr=internal://redpanda-1:9092
+      - --rpc-addr=0.0.0.0:33145
+      - --advertise-rpc-addr=redpanda-1:33145
+      - --seeds=redpanda:33145
+      - --default-log-level=warn
+    volumes: ["redpanda-1:/var/lib/redpanda/data"]
+  redpanda-2:
+    <<: *broker
+    command:
+      - redpanda
+      - start
+      - --mode=dev-container
+      - --smp=1
+      - --memory=700M
+      - --kafka-addr=internal://0.0.0.0:9092
+      - --advertise-kafka-addr=internal://redpanda-2:9092
+      - --rpc-addr=0.0.0.0:33145
+      - --advertise-rpc-addr=redpanda-2:33145
+      - --seeds=redpanda:33145
+      - --default-log-level=warn
+    volumes: ["redpanda-2:/var/lib/redpanda/data"]
+
+  topics:
+    command:
+      - |
+        set -e
+        B="-X brokers=redpanda:9092"
+        # Consumer-group offsets and other internal topics survive a broker too.
+        A="-X admin.hosts=redpanda:9644"
+        rpk cluster config set internal_topic_replication_factor 3 $$A
+        rpk cluster config set default_topic_replications 3 $$A
+        create() { rpk topic create "$$@" $$B || rpk topic describe "$$1" $$B >/dev/null; }
+        for t in orders.commands matching.events settlement.events accounts.events; do
+          create "$$t" -p 4 -r 3 -c retention.ms=604800000 -c min.insync.replicas=2
+        done
+        for t in orders.commands matching.events settlement.events accounts.events; do
+          create "$$t.dlq" -p 1 -r 3 -c retention.ms=2592000000
+        done
+        rpk topic list $$B
+
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.9.0
+    command: ["-host=0.0.0.0", "-config=/config/toxiproxy.json"]
+    volumes: ["./tools/chaos/toxiproxy.json:/config/toxiproxy.json:ro"]
+    ports: ["127.0.0.1:8474:8474"]
+
+  risk:
+    environment:
+      ACCOUNTS_GRPC_URL: http://toxiproxy:50051
+      FAILPOINTS: ${RISK_FAILPOINTS:-}
+    depends_on:
+      toxiproxy:
+        condition: service_started
+
+  settlement:
+    environment:
+      FAILPOINTS: ${SETTLEMENT_FAILPOINTS:-}
+
+  matching-0:
+    environment:
+      SNAPSHOT_INTERVAL: "${SNAPSHOT_INTERVAL:-500}"
+      FAILPOINTS: ${MATCHING_FAILPOINTS:-}
+  matching-1:
+    environment:
+      SNAPSHOT_INTERVAL: "${SNAPSHOT_INTERVAL:-500}"
+      FAILPOINTS: ${MATCHING_FAILPOINTS:-}
+  matching-2:
+    environment:
+      SNAPSHOT_INTERVAL: "${SNAPSHOT_INTERVAL:-500}"
+      FAILPOINTS: ${MATCHING_FAILPOINTS:-}
+  matching-3:
+    environment:
+      SNAPSHOT_INTERVAL: "${SNAPSHOT_INTERVAL:-500}"
+      FAILPOINTS: ${MATCHING_FAILPOINTS:-}
+
+volumes:
+  redpanda-1:
+  redpanda-2:

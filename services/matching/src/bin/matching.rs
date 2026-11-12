@@ -112,6 +112,13 @@ Connection: close
 
 fn main() -> ExitCode {
     let _telemetry = telemetry::init("matching");
+    let _failpoints = std::env::var("FAILPOINTS")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(|v| {
+            tracing::warn!(failpoints = %v, "crash points are on");
+            fail::FailScenario::setup()
+        });
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

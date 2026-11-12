@@ -1,0 +1,29 @@
+# Benchmark overlay: PostgreSQL on a "fast disk" (memory), so the numbers
+# show what the services can do once the test machine's virtual disk
+# (about 22 flushes/s, with pauses of 10-18 s) is out of the way. This is
+# the spec's tuning step 3, "put PostgreSQL on a dedicated fast SSD",
+# simulated. Every result taken with it says so.
+#
+#   docker compose -p oxbench -f docker-compose.yml -f tools/loadgen/compose.fast-db.yml up -d --wait
+#
+# MATCHER_SNAPSHOT_INTERVAL (default 1,000,000) keeps matchers from writing a
+# snapshot during a run, so restarting one afterwards replays every command
+# of the run: the spec's "recovery with 100,000 commands to replay".
+name: oxchange
+
+services:
+  postgres:
+    command: ["postgres", "-c", "synchronous_commit=off", "-c", "max_wal_size=512MB"]
+    tmpfs: ["/var/lib/postgresql/data:size=3g"]
+    volumes: !override
+      - ./deploy/helm/oxchange/files/postgres-init.sh:/docker-entrypoint-initdb.d/init.sh:ro
+      - ./deploy/helm/oxchange/files/postgres-init.sql:/init/postgres-init.sql:ro
+
+  matching-0:
+    environment: { SNAPSHOT_INTERVAL: "${MATCHER_SNAPSHOT_INTERVAL:-1000000}" }
+  matching-1:
+    environment: { SNAPSHOT_INTERVAL: "${MATCHER_SNAPSHOT_INTERVAL:-1000000}" }
+  matching-2:
+    environment: { SNAPSHOT_INTERVAL: "${MATCHER_SNAPSHOT_INTERVAL:-1000000}" }
+  matching-3:
+    environment: { SNAPSHOT_INTERVAL: "${MATCHER_SNAPSHOT_INTERVAL:-1000000}" }

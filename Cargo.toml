@@ -19,6 +19,7 @@ members = [
     "services/settlement",
     "tools/auditor",
     "tools/e2e",
+    "tools/loadgen",
 ]
 
 [workspace.package]

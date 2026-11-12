@@ -20,6 +20,7 @@ metrics.workspace = true
 telemetry.workspace = true
 tokio.workspace = true
 tonic.workspace = true
+fail.workspace = true
 
 # The Kafka adapters and the service binary. librdkafka is built from source,
 # which this project does in Docker; host builds leave the feature off.
@@ -28,6 +29,8 @@ ctrlc = { workspace = true, optional = true }
 
 [features]
 kafka = ["dep:rdkafka", "dep:ctrlc"]
+# Crash points that FAILPOINTS can turn on (live failure tests).
+failpoints = ["fail/failpoints"]
 
 [[bin]]
 name = "matching"

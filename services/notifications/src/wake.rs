@@ -11,8 +11,6 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use futures_util::StreamExt;
-use redis::aio::ConnectionManager;
-use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::Hub;
@@ -38,42 +36,20 @@ fn user_of(channel: &str) -> Option<Uuid> {
 /// Publishes wake-ups over a lazily connected, self-healing connection, so
 /// the service starts and keeps storing notifications while Redis is down.
 pub struct Publisher {
-    client: redis::Client,
-    conn: Mutex<Option<ConnectionManager>>,
+    conn: ticker::LazyConnection,
 }
 
 impl Publisher {
     /// Does not connect yet.
     pub fn new(url: &str) -> Result<Self, String> {
         Ok(Self {
-            client: redis::Client::open(url).map_err(|e| e.to_string())?,
-            conn: Mutex::new(None),
+            conn: ticker::LazyConnection::new(url, TIMEOUT)?,
         })
-    }
-
-    async fn conn(&self) -> Result<ConnectionManager, String> {
-        let mut slot = self.conn.lock().await;
-        if let Some(c) = slot.as_ref() {
-            return Ok(c.clone());
-        }
-        let config = redis::aio::ConnectionManagerConfig::new()
-            .set_connection_timeout(TIMEOUT)
-            .set_response_timeout(TIMEOUT)
-            .set_number_of_retries(1);
-        let c = tokio::time::timeout(
-            TIMEOUT * 2,
-            ConnectionManager::new_with_config(self.client.clone(), config),
-        )
-        .await
-        .map_err(|_| "connect timed out".to_owned())?
-        .map_err(|e| e.to_string())?;
-        *slot = Some(c.clone());
-        Ok(c)
     }
 
     /// Tells every copy that `user` has notifications up to `newest_id`.
     pub async fn publish(&self, user: Uuid, newest_id: i64) -> Result<(), String> {
-        let mut c = self.conn().await?;
+        let mut c = self.conn.get().await?;
         let sent = tokio::time::timeout(
             TIMEOUT,
             redis::cmd("PUBLISH")
@@ -86,11 +62,11 @@ impl Publisher {
             Ok(Ok(_)) => Ok(()),
             Ok(Err(e)) => {
                 // Start over with a fresh connection next time.
-                *self.conn.lock().await = None;
+                self.conn.broken();
                 Err(e.to_string())
             }
             Err(_) => {
-                *self.conn.lock().await = None;
+                self.conn.broken();
                 Err("timed out".into())
             }
         }

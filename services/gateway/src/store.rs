@@ -10,8 +10,7 @@
 
 use std::time::Duration;
 
-use redis::aio::ConnectionManager;
-use tokio::sync::Mutex;
+use ticker::LazyConnection;
 use uuid::Uuid;
 
 /// Every Redis call gives up after this long.
@@ -48,51 +47,29 @@ return {allowed, wait}
 ";
 
 pub struct Store {
-    client: redis::Client,
-    conn: Mutex<Option<ConnectionManager>>,
+    conn: LazyConnection,
 }
 
 impl Store {
     /// Does not connect yet, so the Gateway starts while Redis is down.
     pub fn new(url: &str) -> Result<Self, String> {
         Ok(Self {
-            client: redis::Client::open(url).map_err(|e| e.to_string())?,
-            conn: Mutex::new(None),
+            conn: LazyConnection::new(url, TIMEOUT)?,
         })
     }
 
-    async fn conn(&self) -> Result<ConnectionManager, String> {
-        let mut slot = self.conn.lock().await;
-        if let Some(c) = slot.as_ref() {
-            return Ok(c.clone());
-        }
-        let config = redis::aio::ConnectionManagerConfig::new()
-            .set_connection_timeout(TIMEOUT)
-            .set_response_timeout(TIMEOUT)
-            .set_number_of_retries(1);
-        let c = tokio::time::timeout(
-            TIMEOUT * 2,
-            ConnectionManager::new_with_config(self.client.clone(), config),
-        )
-        .await
-        .map_err(|_| "connect timed out".to_owned())?
-        .map_err(|e| e.to_string())?;
-        *slot = Some(c.clone());
-        Ok(c)
-    }
-
     async fn run<T: redis::FromRedisValue>(&self, cmd: redis::Cmd) -> Result<T, String> {
-        let mut c = self.conn().await?;
+        let mut c = self.conn.get().await?;
         match tokio::time::timeout(TIMEOUT, cmd.query_async::<T>(&mut c)).await {
             Ok(Ok(v)) => Ok(v),
             Ok(Err(e)) => {
                 if e.is_io_error() || e.is_connection_dropped() || e.is_timeout() {
-                    *self.conn.lock().await = None;
+                    self.conn.broken();
                 }
                 Err(e.to_string())
             }
             Err(_) => {
-                *self.conn.lock().await = None;
+                self.conn.broken();
                 Err("timed out".into())
             }
         }
@@ -106,7 +83,7 @@ impl Store {
         capacity: u32,
         interval_ms: u64,
     ) -> Result<Option<u64>, String> {
-        let mut c = self.conn().await?;
+        let mut c = self.conn.get().await?;
         let script = redis::Script::new(TAKE);
         let mut inv = script.key(key);
         inv.arg(capacity).arg(interval_ms);
@@ -115,11 +92,11 @@ impl Store {
             Ok(Ok((1, _))) => Ok(None),
             Ok(Ok((_, wait))) => Ok(Some(u64::try_from(wait).unwrap_or(1000))),
             Ok(Err(e)) => {
-                *self.conn.lock().await = None;
+                self.conn.broken();
                 Err(e.to_string())
             }
             Err(_) => {
-                *self.conn.lock().await = None;
+                self.conn.broken();
                 Err("timed out".into())
             }
         }

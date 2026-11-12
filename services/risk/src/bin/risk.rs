@@ -178,6 +178,15 @@ async fn main() -> ExitCode {
         "risk",
         telemetry::Mode::for_command(args.get(1).map(String::as_str)),
     );
+    // Crash points for the live failure tests; only with the `failpoints`
+    // feature and a non-empty FAILPOINTS (e.g. "NAME=1*return(exit)").
+    let _failpoints = std::env::var("FAILPOINTS")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(|v| {
+            tracing::warn!(failpoints = %v, "crash points are on");
+            fail::FailScenario::setup()
+        });
     let result = match args.get(1).map(String::as_str) {
         None | Some("serve") => serve().await,
         Some("migrate") => {
