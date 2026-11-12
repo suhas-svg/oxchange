@@ -1,0 +1,8 @@
+[
+  {
+    "name": "accounts",
+    "listen": "0.0.0.0:50051",
+    "upstream": "accounts:50051",
+    "enabled": true
+  }
+]

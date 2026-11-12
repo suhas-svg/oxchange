@@ -38,6 +38,14 @@ pub const OUTBOX_LOCK_KEY: i64 = 0x5345_544C;
 /// marked SETTLED (spec failure test "Exact-moment settlement crash").
 pub const CRASH_AFTER_SETTLE_TRADE: &str = "settlement::after_settle_trade";
 
+/// What a crash point does when FAILPOINTS sets it to `return(exit)`: the
+/// process ends on the spot, with no cleanup, like a real crash. Live
+/// failure tests (tools/chaos) use this; tests in this crate use `return`.
+pub fn crash_now(point: &str) -> ! {
+    eprintln!("crash point {point} fired; exiting");
+    std::process::exit(86)
+}
+
 pub struct Settlement<A> {
     pool: PgPool,
     accounts: A,
@@ -165,9 +173,12 @@ impl<A: AccountsApi> Settlement<A> {
                 },
             );
         }
-        fail::fail_point!(CRASH_AFTER_SETTLE_TRADE, |_| Err(HandlerError::Retry(
-            "crash point after SettleTrade".into()
-        )));
+        fail::fail_point!(CRASH_AFTER_SETTLE_TRADE, |arg: Option<String>| {
+            if arg.as_deref() == Some("exit") {
+                crash_now(CRASH_AFTER_SETTLE_TRADE);
+            }
+            Err(HandlerError::Retry("crash point after SettleTrade".into()))
+        });
 
         let mut tx = self.pool.begin().await.map_err(db_error)?;
         // Also returns the spec's "trade to final balance" delay.

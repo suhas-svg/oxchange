@@ -3,7 +3,13 @@
 //! ```text
 //! e2e produce <count> <rate_per_sec> <seed>
 //! e2e verify  [timeout_secs]
+//! e2e republish <seconds> <percent> [seed]
 //! ```
+//!
+//! `republish` is the spec's "Duplicate events" failure: for `seconds` it
+//! reads every new message on the four main topics and writes a copy of
+//! `percent` of them back to the same partition (same key, payload and
+//! headers). Consumers must ignore the copies.
 //!
 //! `verify` is the Gate 1 "restart output is identical" check. For every
 //! partition it rereads all of `orders.commands`, runs a fresh engine over it
@@ -29,6 +35,7 @@ use matching::{DEFAULT_DEDUP_CAPACITY, Engine};
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::error::{KafkaError, RDKafkaErrorCode};
+use rdkafka::message::{Header, Headers, OwnedHeaders};
 use rdkafka::producer::{BaseRecord, DefaultProducerContext, Producer, ThreadedProducer};
 use rdkafka::{Message, Offset, TopicPartitionList};
 
@@ -51,7 +58,14 @@ fn main() -> ExitCode {
             let secs = args.get(2).and_then(|v| v.parse().ok()).unwrap_or(180);
             verify(&brokers, Duration::from_secs(secs))
         }
-        _ => Err("usage: e2e produce <count> <rate> <seed> | e2e verify [timeout_secs]".into()),
+        Some("republish") => {
+            let secs = args.get(2).and_then(|v| v.parse().ok()).unwrap_or(60);
+            let percent = args.get(3).and_then(|v| v.parse().ok()).unwrap_or(1);
+            let seed = args.get(4).and_then(|v| v.parse().ok()).unwrap_or(42);
+            republish(&brokers, Duration::from_secs(secs), percent, seed)
+        }
+        _ => Err("usage: e2e produce <count> <rate> <seed> | e2e verify [timeout_secs]                   | e2e republish <seconds> <percent> [seed]"
+            .into()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -269,4 +283,82 @@ fn verify(brokers: &str, timeout: Duration) -> Result<(), String> {
         totals.0, totals.1, totals.2
     );
     Ok(())
+}
+
+/// Topics whose messages `republish` copies.
+const REPUBLISHED: [&str; 4] = [COMMANDS, EVENTS, "settlement.events", "accounts.events"];
+
+fn republish(brokers: &str, run_for: Duration, percent: u64, seed: u64) -> Result<(), String> {
+    let c = consumer(brokers)?;
+    let mut tpl = TopicPartitionList::new();
+    for topic in REPUBLISHED {
+        for p in 0..partitions(&c, topic)? {
+            tpl.add_partition_offset(topic, p, Offset::End)
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    c.assign(&tpl).map_err(|e| e.to_string())?;
+    let producer: ThreadedProducer<DefaultProducerContext> = ClientConfig::new()
+        .set("bootstrap.servers", brokers)
+        .set("acks", "all")
+        .set("enable.idempotence", "true")
+        .create()
+        .map_err(|e| e.to_string())?;
+    let started = Instant::now();
+    let (mut read, mut copied) = (0u64, HashMap::<&str, u64>::new());
+    while started.elapsed() < run_for {
+        let Some(msg) = c.poll(Duration::from_millis(200)) else {
+            continue;
+        };
+        let msg = msg.map_err(|e| e.to_string())?;
+        read += 1;
+        // The same seed picks the same messages, whatever the timing.
+        let pick = mix(seed ^ mix(msg.offset() as u64) ^ ((msg.partition() as u64) << 48)) % 10_000
+            < percent * 100;
+        if !pick {
+            continue;
+        }
+        let topic = REPUBLISHED
+            .into_iter()
+            .find(|t| *t == msg.topic())
+            .unwrap_or(EVENTS);
+        let mut headers = OwnedHeaders::new();
+        if let Some(hs) = msg.headers() {
+            for h in hs.iter() {
+                headers = headers.insert(Header {
+                    key: h.key,
+                    value: h.value,
+                });
+            }
+        }
+        let mut record = BaseRecord::<[u8], [u8]>::to(topic)
+            .partition(msg.partition())
+            .payload(msg.payload().unwrap_or_default())
+            .headers(headers);
+        if let Some(k) = msg.key() {
+            record = record.key(k);
+        }
+        let mut record = Some(record);
+        while let Some(r) = record.take() {
+            match producer.send(r) {
+                Ok(()) => *copied.entry(topic).or_default() += 1,
+                Err((KafkaError::MessageProduction(RDKafkaErrorCode::QueueFull), r)) => {
+                    thread::sleep(Duration::from_millis(5));
+                    record = Some(r);
+                }
+                Err((e, _)) => return Err(e.to_string()),
+            }
+        }
+    }
+    producer.flush(TIMEOUT).map_err(|e| e.to_string())?;
+    let total: u64 = copied.values().sum();
+    println!("read {read} messages, republished {total} ({percent}%): {copied:?}");
+    Ok(())
+}
+
+/// splitmix64's finalizer.
+fn mix(mut z: u64) -> u64 {
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
 }

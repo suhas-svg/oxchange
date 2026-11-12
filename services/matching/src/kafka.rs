@@ -50,17 +50,32 @@ pub struct KafkaSource {
     ready: Arc<AtomicBool>,
 }
 
-/// The partition's low and high offsets. Waits (up to [`TOPIC_WAIT`]) while
-/// the topic or partition does not exist yet, instead of crash-looping.
-fn watermarks(
-    consumer: &BaseConsumer<InputLag>,
+/// A consumer for one partition of orders.commands and that partition's low
+/// and high offsets. Waits (up to [`TOPIC_WAIT`]) while the topic or
+/// partition is unknown, instead of crash-looping: at a fresh install the
+/// matchers can start before the topic exists, and while a broker restarts
+/// the metadata can briefly leave the partition out. Each try uses a new
+/// client, because a client that once saw the partition missing kept
+/// answering "unknown partition" for minutes.
+fn consumer_with_watermarks(
+    brokers: &str,
     partition: u32,
-) -> Result<(i64, i64), TransportError> {
+) -> Result<(BaseConsumer<InputLag>, (i64, i64)), TransportError> {
     let started = Instant::now();
     let mut logged = false;
     loop {
+        let consumer: BaseConsumer<InputLag> = ClientConfig::new()
+            .set("bootstrap.servers", brokers)
+            // Required by the client; nothing is ever committed under it.
+            .set("group.id", format!("matching-p{partition}"))
+            .set("enable.auto.commit", "false")
+            .set("enable.auto.offset.store", "false")
+            .set("enable.partition.eof", "false")
+            .set("statistics.interval.ms", "5000")
+            .create_with_context(InputLag)
+            .map_err(err)?;
         match consumer.fetch_watermarks(COMMANDS_TOPIC, partition as i32, METADATA_TIMEOUT) {
-            Ok(w) => return Ok(w),
+            Ok(w) => return Ok((consumer, w)),
             Err(KafkaError::MetadataFetch(
                 code @ (RDKafkaErrorCode::UnknownPartition
                 | RDKafkaErrorCode::UnknownTopicOrPartition
@@ -70,11 +85,34 @@ fn watermarks(
                     tracing::warn!(partition, error = %code, "waiting for orders.commands to exist");
                     logged = true;
                 }
+                drop(consumer);
                 thread::sleep(Duration::from_secs(1));
             }
             Err(e) => return Err(err(e)),
         }
     }
+}
+
+/// Errors from reading that only mean a broker is unreachable for now. The
+/// client reconnects and moves to the new partition leader by itself, so the
+/// engine waits instead of stopping (it used to exit when one of three
+/// brokers died).
+fn transient(e: &KafkaError) -> bool {
+    use RDKafkaErrorCode as C;
+    matches!(
+        e,
+        KafkaError::MessageConsumption(
+            C::BrokerTransportFailure
+                | C::AllBrokersDown
+                | C::Resolve
+                | C::RequestTimedOut
+                | C::NetworkException
+                | C::NotLeaderForPartition
+                | C::LeaderNotAvailable
+                | C::OperationTimedOut
+                | C::BrokerNotAvailable
+        )
+    )
 }
 
 impl KafkaSource {
@@ -93,18 +131,7 @@ impl KafkaSource {
         process_started: Instant,
         ready: Arc<AtomicBool>,
     ) -> Result<Self, TransportError> {
-        let consumer: BaseConsumer<InputLag> = ClientConfig::new()
-            .set("bootstrap.servers", brokers)
-            // Required by the client; nothing is ever committed under it.
-            .set("group.id", format!("matching-p{partition}"))
-            .set("enable.auto.commit", "false")
-            .set("enable.auto.offset.store", "false")
-            .set("enable.partition.eof", "false")
-            .set("statistics.interval.ms", "5000")
-            .create_with_context(InputLag)
-            .map_err(err)?;
-
-        let (low, high) = watermarks(&consumer, partition)?;
+        let (consumer, (low, high)) = consumer_with_watermarks(brokers, partition)?;
         let (low, high) = (low.max(0) as u64, high.max(0) as u64);
         if next_offset < low {
             return Err(TransportError(format!(
@@ -174,6 +201,9 @@ impl ClientContext for InputLag {
 
 impl rdkafka::consumer::ConsumerContext for InputLag {}
 
+/// Named crash point for the live failure tests.
+pub const CRASH_DURING_REPLAY: &str = "matching::during_replay";
+
 impl KafkaSource {
     /// Replay is over: ready for traffic, and the restart time is known.
     fn mark_ready(&self) {
@@ -191,8 +221,31 @@ impl CommandSource for KafkaSource {
             metrics::gauge!("matcher_input_lag").set(0.0);
             return Ok(Fetched::Idle);
         };
-        let msg = result.map_err(err)?;
+        let msg = match result {
+            Ok(m) => m,
+            Err(e) if transient(&e) => {
+                tracing::warn!(error = %e, "kafka read failed; the client is reconnecting");
+                thread::sleep(POLL);
+                return Ok(Fetched::Idle);
+            }
+            Err(e) => return Err(err(e)),
+        };
         let offset = msg.offset() as u64;
+        // Spec failure test "Crash during replay": a crash while a restart
+        // is still catching up. Recovery is far too quick to hit with a timed
+        // kill, so this point ends the process on the first replayed command.
+        if !self.replay_done {
+            fail::fail_point!(
+                CRASH_DURING_REPLAY,
+                |_arg: Option<String>| -> Result<Fetched, TransportError> {
+                    eprintln!("crash point {CRASH_DURING_REPLAY} fired; exiting");
+                    // Status 0, so the `on-failure` restart policy leaves the
+                    // container down and the test decides when it starts again
+                    // (otherwise it restarts into the same crash, over and over).
+                    std::process::exit(0)
+                }
+            );
+        }
         if !self.replay_done && offset + 1 >= self.replay_until {
             self.replay_done = true;
             self.mark_ready();

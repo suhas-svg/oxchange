@@ -273,9 +273,12 @@ impl<A: AccountsApi> Risk<A> {
             Ok(_) => {
                 // Spec failure test "Exact-moment Risk crash": the funds are
                 // reserved but the status save never happens.
-                fail::fail_point!(crate::CRASH_AFTER_RESERVE, |_| Err(RiskError::Unavailable(
-                    "crash point after Reserve".into()
-                )));
+                fail::fail_point!(crate::CRASH_AFTER_RESERVE, |arg: Option<String>| {
+                    if arg.as_deref() == Some("exit") {
+                        crate::crash_now(crate::CRASH_AFTER_RESERVE);
+                    }
+                    Err(RiskError::Unavailable("crash point after Reserve".into()))
+                });
             }
             Err(s) if outcome_unknown(&s) => {
                 // The reply may be lost after Reserve worked: void it, which

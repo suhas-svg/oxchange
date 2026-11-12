@@ -32,6 +32,14 @@ pub const OUTBOX_LOCK_KEY: i64 = 0x5249_534B;
 /// Named crash point between a successful Reserve and saving ACCEPTED.
 pub const CRASH_AFTER_RESERVE: &str = "risk::after_reserve";
 
+/// What a crash point does when FAILPOINTS sets it to `return(exit)`: the
+/// process ends on the spot, with no cleanup, like a real crash. Live
+/// failure tests (tools/chaos) use this; tests in this crate use `return`.
+pub fn crash_now(point: &str) -> ! {
+    eprintln!("crash point {point} fired; exiting");
+    std::process::exit(86)
+}
+
 /// Spec: "The user has fewer than 200 open orders".
 pub const MAX_OPEN_ORDERS: i64 = 200;
 /// Spec: "Risk returns SERVICE_UNAVAILABLE when more than 50,000 commands are unpublished".
