@@ -29,6 +29,9 @@ pub const COMMANDS_DLQ_TOPIC: &str = "orders.commands.dlq";
 
 const POLL: Duration = Duration::from_millis(100);
 const METADATA_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long to wait for orders.commands and this partition to exist. At a
+/// fresh install the matchers can start before the topic is created.
+const TOPIC_WAIT: Duration = Duration::from_secs(180);
 const FLUSH_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn err(e: impl std::fmt::Display) -> TransportError {
@@ -45,6 +48,33 @@ pub struct KafkaSource {
     replay_done: bool,
     /// Shared with the health endpoint: true once replay is done.
     ready: Arc<AtomicBool>,
+}
+
+/// The partition's low and high offsets. Waits (up to [`TOPIC_WAIT`]) while
+/// the topic or partition does not exist yet, instead of crash-looping.
+fn watermarks(
+    consumer: &BaseConsumer<InputLag>,
+    partition: u32,
+) -> Result<(i64, i64), TransportError> {
+    let started = Instant::now();
+    let mut logged = false;
+    loop {
+        match consumer.fetch_watermarks(COMMANDS_TOPIC, partition as i32, METADATA_TIMEOUT) {
+            Ok(w) => return Ok(w),
+            Err(KafkaError::MetadataFetch(
+                code @ (RDKafkaErrorCode::UnknownPartition
+                | RDKafkaErrorCode::UnknownTopicOrPartition
+                | RDKafkaErrorCode::UnknownTopic),
+            )) if started.elapsed() < TOPIC_WAIT => {
+                if !logged {
+                    tracing::warn!(partition, error = %code, "waiting for orders.commands to exist");
+                    logged = true;
+                }
+                thread::sleep(Duration::from_secs(1));
+            }
+            Err(e) => return Err(err(e)),
+        }
+    }
 }
 
 impl KafkaSource {
@@ -74,9 +104,7 @@ impl KafkaSource {
             .create_with_context(InputLag)
             .map_err(err)?;
 
-        let (low, high) = consumer
-            .fetch_watermarks(COMMANDS_TOPIC, partition as i32, METADATA_TIMEOUT)
-            .map_err(err)?;
+        let (low, high) = watermarks(&consumer, partition)?;
         let (low, high) = (low.max(0) as u64, high.max(0) as u64);
         if next_offset < low {
             return Err(TransportError(format!(
