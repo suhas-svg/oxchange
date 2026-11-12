@@ -30,6 +30,8 @@ name = "risk"
 required-features = ["kafka"]
 
 [features]
+# Crash points that FAILPOINTS can turn on (live failure tests).
+failpoints = ["fail/failpoints"]
 kafka = ["outbox/kafka", "consumer/kafka"]
 
 [dev-dependencies]

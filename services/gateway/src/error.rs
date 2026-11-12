@@ -97,9 +97,12 @@ impl ApiError {
                 Code::NotFound => StatusCode::NOT_FOUND,
                 Code::AlreadyExists => StatusCode::CONFLICT,
                 Code::FailedPrecondition => StatusCode::UNPROCESSABLE_ENTITY,
-                Code::Unavailable | Code::DeadlineExceeded | Code::Cancelled => {
-                    StatusCode::SERVICE_UNAVAILABLE
-                }
+                // ResourceExhausted is overload, not a bug: past ~1,000 timed-out
+                // calls the HTTP/2 client closes the connection with it.
+                Code::Unavailable
+                | Code::DeadlineExceeded
+                | Code::Cancelled
+                | Code::ResourceExhausted => StatusCode::SERVICE_UNAVAILABLE,
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
             },
         };
@@ -181,6 +184,9 @@ mod tests {
         assert!(!e.message.contains("ledger"));
         let e = ApiError::from_status(&tonic::Status::unavailable("connection refused"));
         assert_eq!(e.code, "SERVICE_UNAVAILABLE");
+        // Overload closes the HTTP/2 connection with ResourceExhausted.
+        let e = ApiError::from_status(&tonic::Status::resource_exhausted("h2 protocol error"));
+        assert_eq!(e.status, StatusCode::SERVICE_UNAVAILABLE);
         // A message without a code still gets one.
         let e = ApiError::from_status(&tonic::Status::not_found("no such thing"));
         assert_eq!(

@@ -14,7 +14,9 @@ use std::time::Duration;
 use redis::AsyncCommands;
 
 use redis::aio::ConnectionManager;
-use tokio::sync::Mutex;
+
+mod conn;
+pub use conn::{LazyConnection, RETRY_AFTER};
 
 /// Every Redis call gives up after this long.
 pub const TIMEOUT: Duration = Duration::from_millis(300);
@@ -50,55 +52,32 @@ pub struct Unavailable(pub String);
 /// A lazily connected, self-healing Redis connection. The first call after
 /// Redis comes back reconnects.
 pub struct Store {
-    client: redis::Client,
-    conn: Mutex<Option<ConnectionManager>>,
+    conn: LazyConnection,
 }
 
 impl Store {
     /// Does not connect yet, so a service can start while Redis is down.
     pub fn new(url: &str) -> Result<Self, Unavailable> {
         Ok(Self {
-            client: redis::Client::open(url).map_err(|e| Unavailable(e.to_string()))?,
-            conn: Mutex::new(None),
+            conn: LazyConnection::new(url, TIMEOUT).map_err(Unavailable)?,
         })
-    }
-
-    async fn conn(&self) -> Result<ConnectionManager, Unavailable> {
-        let mut slot = self.conn.lock().await;
-        if let Some(c) = slot.as_ref() {
-            return Ok(c.clone());
-        }
-        let config = redis::aio::ConnectionManagerConfig::new()
-            .set_connection_timeout(TIMEOUT)
-            .set_response_timeout(TIMEOUT)
-            .set_number_of_retries(1);
-        let c = tokio::time::timeout(
-            TIMEOUT * 2,
-            ConnectionManager::new_with_config(self.client.clone(), config),
-        )
-        .await
-        .map_err(|_| Unavailable("connect timed out".into()))?
-        .map_err(|e| Unavailable(e.to_string()))?;
-        *slot = Some(c.clone());
-        Ok(c)
     }
 
     async fn run<T>(
         &self,
         f: impl AsyncFnOnce(&mut ConnectionManager) -> redis::RedisResult<T>,
     ) -> Result<T, Unavailable> {
-        let mut c = self.conn().await?;
+        let mut c = self.conn.get().await.map_err(Unavailable)?;
         match tokio::time::timeout(TIMEOUT, f(&mut c)).await {
             Ok(Ok(v)) => Ok(v),
             Ok(Err(e)) => {
                 if e.is_io_error() || e.is_connection_dropped() || e.is_timeout() {
-                    // Start over with a fresh connection next time.
-                    *self.conn.lock().await = None;
+                    self.conn.broken();
                 }
                 Err(Unavailable(e.to_string()))
             }
             Err(_) => {
-                *self.conn.lock().await = None;
+                self.conn.broken();
                 Err(Unavailable("timed out".into()))
             }
         }

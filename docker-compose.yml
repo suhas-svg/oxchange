@@ -340,6 +340,19 @@ services:
       postgres:
         condition: service_healthy
 
+  # Open-loop load generator (tools/loadgen). Talks to the Gateway like a
+  # client and to Accounts only to create and fund its users. Writes its
+  # report to ./target/loadgen/.
+  #   docker compose run --rm loadgen --rate 500 --duration 60 --out /out/run.json
+  loadgen:
+    image: oxchange:dev
+    profiles: ["tools"]
+    entrypoint: ["loadgen"]
+    volumes: ["./target/loadgen:/out"]
+    depends_on:
+      gateway:
+        condition: service_healthy
+
   # The only service browsers talk to (through the web server below).
   gateway:
     image: oxchange:dev

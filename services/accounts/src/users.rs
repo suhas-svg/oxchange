@@ -68,8 +68,22 @@ fn check_password(password: &str) -> Result<()> {
     }
 }
 
+/// Password hashes running at once: one per CPU. Each Argon2id hash takes
+/// about 19 MiB. Without a limit, a burst of sign-ups or logins ran one per
+/// blocking thread (up to 512), and the allocator kept every thread's memory:
+/// Accounts grew past 4 GB. The limit also stops a login flood from taking
+/// every CPU; callers wait their turn instead.
+static HASHING: LazyLock<tokio::sync::Semaphore> = LazyLock::new(|| {
+    let cpus = std::thread::available_parallelism().map_or(2, |n| n.get());
+    tokio::sync::Semaphore::new(cpus.clamp(1, 8))
+});
+
 /// Argon2id is deliberately slow; keep it off the async worker threads.
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    let _permit = HASHING
+        .acquire()
+        .await
+        .expect("the semaphore is never closed");
     tokio::task::spawn_blocking(f)
         .await
         .expect("password hashing panicked")
