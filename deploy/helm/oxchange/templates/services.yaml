@@ -86,6 +86,8 @@ spec:
       labels:
         app.kubernetes.io/name: {{ $app.name }}
         {{- include "oxchange.labels" $root | nindent 8 }}
+      annotations:
+        {{- include "oxchange.scrape" (list 9464 "") | nindent 8 }}
     spec:
       {{- include "oxchange.podSecurity" $root | nindent 6 }}
       # Spec: on SIGTERM a service exits within 25 seconds.
@@ -122,8 +124,10 @@ spec:
             {{- include "oxchange.databaseEnv" (list "DATABASE_URL" $app.db $app.db) | nindent 12 }}
             {{- end }}
             {{- include (printf "oxchange.env.%s" $app.name) $root | nindent 12 }}
+            {{- include "oxchange.telemetryEnv" $root | nindent 12 }}
             - { name: RUST_LOG, value: {{ $root.Values.logLevel | quote }} }
           ports:
+            - { name: metrics, containerPort: 9464 }
             {{- if $app.port }}
             - { name: {{ $app.port.name }}, containerPort: {{ $app.port.number }} }
             {{- end }}

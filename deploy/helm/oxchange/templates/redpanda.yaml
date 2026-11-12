@@ -33,6 +33,8 @@ spec:
       labels:
         app.kubernetes.io/name: redpanda
         {{- include "oxchange.labels" . | nindent 8 }}
+      annotations:
+        {{- include "oxchange.scrape" (list 9644 "/public_metrics") | nindent 8 }}
     spec:
       securityContext:
         # The redpanda user in the image.

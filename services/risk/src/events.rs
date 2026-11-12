@@ -53,14 +53,20 @@ impl<A: AccountsApi> Risk<A> {
         }
         match &e.body {
             Some(ev::matching_event::Body::OrderAccepted(a)) => {
-                sqlx::query(
+                // Returns how long ago the order was saved: the spec's
+                // end-to-end order latency, up to the matcher's answer.
+                let age: Option<(f64,)> = sqlx::query_as(
                     "UPDATE orders SET status = 'OPEN', updated_at = now()
-                     WHERE order_id = $1 AND status = 'ACCEPTED'",
+                     WHERE order_id = $1 AND status = 'ACCEPTED'
+                     RETURNING extract(epoch FROM clock_timestamp() - created_at)::float8",
                 )
                 .bind(order_id(&a.order_id)?)
-                .execute(&mut *tx)
+                .fetch_optional(&mut *tx)
                 .await
                 .map_err(db_error)?;
+                if let Some((secs,)) = age {
+                    metrics::histogram!("order_end_to_end_seconds").record(secs);
+                }
             }
             Some(ev::matching_event::Body::Trade(t)) => {
                 for id in [&t.buy_order_id, &t.sell_order_id] {

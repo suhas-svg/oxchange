@@ -24,9 +24,16 @@
 //! );
 //! CREATE INDEX outbox_unpublished ON outbox (id) WHERE published_at IS NULL;
 //! ```
+//!
+//! Metrics: `outbox_unpublished` (rows waiting, sampled every 2 s by the
+//! relay holding the lock) and `outbox_publish_seconds{topic}` (from saving
+//! a row to Kafka confirming it).
+//!
+//! The current span's trace context is saved with each message as a
+//! `traceparent` header, so the trace continues in whoever consumes it.
 
 use std::future::Future;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sqlx::pool::PoolConnection;
 use sqlx::{PgConnection, PgPool, Postgres};
@@ -50,7 +57,8 @@ pub trait Publisher: Send + Sync {
     fn publish(&self, rows: &[Row]) -> impl Future<Output = Result<(), String>> + Send;
 }
 
-/// Queues a message inside the caller's transaction.
+/// Queues a message inside the caller's transaction. Unless `headers`
+/// already has one, the current trace context is added as `traceparent`.
 pub async fn enqueue(
     conn: &mut PgConnection,
     topic: &str,
@@ -58,10 +66,15 @@ pub async fn enqueue(
     payload: &[u8],
     headers: &[(String, String)],
 ) -> sqlx::Result<()> {
-    let headers: serde_json::Map<String, serde_json::Value> = headers
+    let mut headers: serde_json::Map<String, serde_json::Value> = headers
         .iter()
         .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
         .collect();
+    if !headers.contains_key("traceparent")
+        && let Some(tp) = telemetry::current_traceparent()
+    {
+        headers.insert("traceparent".into(), serde_json::Value::String(tp));
+    }
     sqlx::query(
         "INSERT INTO outbox (topic, message_key, payload, headers) VALUES ($1, $2, $3, $4)",
     )
@@ -81,6 +94,9 @@ pub async fn unpublished(pool: &PgPool) -> sqlx::Result<i64> {
         .await?;
     Ok(n)
 }
+
+/// How often the relay samples `outbox_unpublished`.
+const BACKLOG_SAMPLE: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone)]
 pub struct RelayConfig {
@@ -113,9 +129,10 @@ pub async fn publish_batch<P: Publisher>(
     publisher: &P,
     batch_size: i64,
 ) -> Result<usize, String> {
-    let rows: Vec<(i64, String, String, Vec<u8>, serde_json::Value)> = sqlx::query_as(
-        "SELECT id, topic, message_key, payload, headers FROM outbox
-         WHERE published_at IS NULL ORDER BY id LIMIT $1",
+    let rows: Vec<(i64, String, String, Vec<u8>, serde_json::Value, f64)> = sqlx::query_as(
+        "SELECT id, topic, message_key, payload, headers,
+                extract(epoch FROM clock_timestamp() - created_at)::float8
+         FROM outbox WHERE published_at IS NULL ORDER BY id LIMIT $1",
     )
     .bind(batch_size)
     .fetch_all(&mut *conn)
@@ -124,9 +141,11 @@ pub async fn publish_batch<P: Publisher>(
     if rows.is_empty() {
         return Ok(0);
     }
+    let waited: Vec<(String, f64)> = rows.iter().map(|r| (r.1.clone(), r.5)).collect();
+    let sent = Instant::now();
     let rows: Vec<Row> = rows
         .into_iter()
-        .map(|(id, topic, key, payload, headers)| Row {
+        .map(|(id, topic, key, payload, headers, _)| Row {
             id,
             topic,
             key,
@@ -141,6 +160,12 @@ pub async fn publish_batch<P: Publisher>(
         })
         .collect();
     publisher.publish(&rows).await?;
+    // Age when read, plus the time Kafka took to confirm.
+    let confirm = sent.elapsed();
+    for (topic, age) in waited {
+        let age = Duration::try_from_secs_f64(age).unwrap_or_default() + confirm;
+        metrics::histogram!("outbox_publish_seconds", "topic" => topic).record(age.as_secs_f64());
+    }
     let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
     sqlx::query("UPDATE outbox SET published_at = now() WHERE id = ANY($1)")
         .bind(&ids)
@@ -173,7 +198,15 @@ pub async fn run<P: Publisher>(
 ) {
     tokio::pin!(shutdown);
     let mut lock: Option<PoolConnection<Postgres>> = None;
+    let backlog = metrics::gauge!("outbox_unpublished");
+    let mut sampled: Option<Instant> = None;
     loop {
+        if lock.is_some() && sampled.is_none_or(|t| t.elapsed() >= BACKLOG_SAMPLE) {
+            sampled = Some(Instant::now());
+            if let Ok(n) = unpublished(&pool).await {
+                backlog.set(n as f64);
+            }
+        }
         let wait = match lock.as_mut() {
             None => match try_lock(&pool, config.lock_key).await {
                 Ok(Some(conn)) => {

@@ -82,3 +82,19 @@ readinessProbe:
   periodSeconds: 3
   timeoutSeconds: 3
 {{- end }}
+
+{{/* Where a service sends traces and logs (nothing when observability is off). */}}
+{{- define "oxchange.telemetryEnv" -}}
+{{- if .Values.observability.enabled }}
+- { name: OTEL_EXPORTER_OTLP_ENDPOINT, value: "http://otel-collector:4318" }
+- { name: TRACE_SAMPLE_RATIO, value: {{ .Values.observability.traceSampleRatio | quote }} }
+{{- end }}
+- { name: METRICS_ADDR, value: "0.0.0.0:9464" }
+{{- end }}
+
+{{/* Pod annotations that ask Prometheus to scrape it. Call with (list port path). */}}
+{{- define "oxchange.scrape" -}}
+prometheus.io/scrape: "true"
+prometheus.io/port: {{ index . 0 | quote }}
+prometheus.io/path: {{ index . 1 | default "/metrics" | quote }}
+{{- end }}

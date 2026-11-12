@@ -17,7 +17,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gateway::{Config, Gateway, router};
-use tracing_subscriber::EnvFilter;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -97,7 +96,11 @@ async fn serve() -> Result<(), BoxError> {
     let (stop, mut stopped) = tokio::sync::watch::channel(false);
     let server = axum::serve(
         listener,
-        router(gw).into_make_service_with_connect_info::<SocketAddr>(),
+        router(gw)
+            // Outermost, so every request is inside its span; the trace
+            // starts here whatever the client sent.
+            .layer(telemetry::server::ServerLayer::edge())
+            .into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(async move {
         let _ = stopped.changed().await;
@@ -126,11 +129,11 @@ async fn serve() -> Result<(), BoxError> {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    tracing_subscriber::fmt()
-        .json()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-        .init();
     let args: Vec<String> = std::env::args().collect();
+    let _telemetry = telemetry::init_with(
+        "gateway",
+        telemetry::Mode::for_command(args.get(1).map(String::as_str)),
+    );
     let result = match args.get(1).map(String::as_str) {
         None | Some("serve") => serve().await,
         Some("health") => health_probe(),

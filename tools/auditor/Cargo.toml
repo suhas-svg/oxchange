@@ -8,6 +8,8 @@ license.workspace = true
 publish = false
 
 [dependencies]
+telemetry.workspace = true
+metrics.workspace = true
 accounts.workspace = true
 prost.workspace = true
 proto-gen.workspace = true
@@ -15,7 +17,6 @@ rdkafka = { workspace = true, optional = true }
 sqlx.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 uuid.workspace = true
 
 [features]

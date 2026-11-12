@@ -7,6 +7,8 @@ license.workspace = true
 publish = false
 
 [dependencies]
+telemetry = { workspace = true, features = ["grpc", "sqlx"] }
+metrics.workspace = true
 axum.workspace = true
 consumer.workspace = true
 fail.workspace = true
@@ -18,7 +20,6 @@ time.workspace = true
 tokio.workspace = true
 tonic.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 uuid.workspace = true
 
 [[bin]]

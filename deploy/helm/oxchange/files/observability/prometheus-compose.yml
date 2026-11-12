@@ -1,0 +1,33 @@
+# Prometheus for the Compose stack: fixed targets, one job per service.
+# (Kubernetes finds pods instead; see templates/observability.yaml.)
+global:
+  scrape_interval: 10s
+  evaluation_interval: 10s
+rule_files:
+  - /etc/prometheus/alerts.yml
+scrape_configs:
+  - job_name: services
+    static_configs:
+      - { targets: ["accounts:9464"], labels: { job: accounts } }
+      - { targets: ["risk:9464"], labels: { job: risk } }
+      - { targets: ["settlement:9464"], labels: { job: settlement } }
+      - { targets: ["market-data:9464"], labels: { job: market-data } }
+      - { targets: ["notifications:9464"], labels: { job: notifications } }
+      - { targets: ["gateway:9464"], labels: { job: gateway } }
+      - targets: ["matching-0:9464", "matching-1:9464", "matching-2:9464", "matching-3:9464"]
+        labels: { job: matching }
+  # The auditor pushes its result (it exits before it could be scraped).
+  - job_name: pushgateway
+    honor_labels: true
+    static_configs:
+      - targets: ["pushgateway:9091"]
+  - job_name: redpanda
+    metrics_path: /public_metrics
+    static_configs:
+      - targets: ["redpanda:9644"]
+  - job_name: postgres
+    static_configs:
+      - targets: ["postgres-exporter:9187"]
+  - job_name: otel-collector
+    static_configs:
+      - targets: ["otel-collector:8888"]

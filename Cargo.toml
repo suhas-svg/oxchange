@@ -7,6 +7,7 @@ members = [
     "crates/order-book",
     "crates/outbox",
     "crates/proto-gen",
+    "crates/telemetry",
     "crates/ticker",
     "services/accounts",
     "services/gateway",
@@ -36,6 +37,16 @@ settlement = { path = "services/settlement" }
 auditor = { path = "tools/auditor" }
 market-data = { path = "services/market-data" }
 ticker = { path = "crates/ticker" }
+telemetry = { path = "crates/telemetry" }
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.18", default-features = false, features = ["http-listener"] }
+metrics-process = "2"
+opentelemetry = "0.33"
+opentelemetry_sdk = { version = "0.33", default-features = false, features = ["trace", "logs"] }
+opentelemetry-otlp = { version = "0.33", default-features = false, features = ["trace", "logs", "http-proto", "reqwest-blocking-client"] }
+opentelemetry-appender-tracing = "0.33"
+tracing-opentelemetry = "0.34"
+http = "1"
 redis = { version = "0.32", default-features = false, features = ["tokio-comp", "connection-manager", "script"] }
 fail = "0.5"
 argon2 = "0.5"

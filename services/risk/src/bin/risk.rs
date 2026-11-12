@@ -25,7 +25,6 @@ use risk::{
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 use tokio::sync::watch;
-use tracing_subscriber::EnvFilter;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -91,6 +90,7 @@ async fn serve() -> Result<(), BoxError> {
     let brokers = env("KAFKA_BROKERS")?;
     let accounts = GrpcAccounts::connect_lazy(&env("ACCOUNTS_GRPC_URL")?)?;
     let pool = connect().await?;
+    telemetry::watch_pool(pool.clone());
     let listen = env_or("LISTEN_ADDR", "0.0.0.0:50051").parse()?;
     let health_addr = env_or("HEALTH_ADDR", "0.0.0.0:8081");
     let prices = Arc::new(ticker::Store::new(&env("REDIS_URL")?)?);
@@ -154,6 +154,7 @@ async fn serve() -> Result<(), BoxError> {
     tracing::info!(%listen, health = %health_addr, "risk serving");
     let grpc_stop = stopped(stop_rx.clone());
     let server = tonic::transport::Server::builder()
+        .layer(telemetry::server::ServerLayer::grpc())
         .add_service(grpc::Service::server(risk))
         .serve_with_shutdown(listen, grpc_stop);
     tokio::select! {
@@ -172,11 +173,11 @@ async fn serve() -> Result<(), BoxError> {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    tracing_subscriber::fmt()
-        .json()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-        .init();
     let args: Vec<String> = std::env::args().collect();
+    let _telemetry = telemetry::init_with(
+        "risk",
+        telemetry::Mode::for_command(args.get(1).map(String::as_str)),
+    );
     let result = match args.get(1).map(String::as_str) {
         None | Some("serve") => serve().await,
         Some("migrate") => {

@@ -1,0 +1,309 @@
+{{- /*
+Metrics, traces, logs, dashboards and alerts (spec: "Observability"):
+the OpenTelemetry Collector, Tempo, Loki, Prometheus (with the alert rules
+and a Pushgateway for the auditor), a PostgreSQL exporter, and Grafana with
+the four dashboards. The configuration files are shared with Compose; see
+files/observability/.
+*/ -}}
+{{- if .Values.observability.enabled }}
+{{- $root := . }}
+{{- $o := .Values.observability }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: observability
+  labels: {{- include "oxchange.labels" . | nindent 4 }}
+data:
+  otel-collector.yaml: |
+    {{- .Files.Get "files/observability/otel-collector.yaml" | nindent 4 }}
+  tempo.yaml: |
+    {{- .Files.Get "files/observability/tempo.yaml" | nindent 4 }}
+  loki.yaml: |
+    {{- .Files.Get "files/observability/loki.yaml" | nindent 4 }}
+  alerts.yml: |
+    {{- .Files.Get "files/observability/alerts.yml" | nindent 4 }}
+  grafana-datasources.yaml: |
+    {{- .Files.Get "files/observability/grafana-datasources.yaml" | nindent 4 }}
+  grafana-dashboards.yaml: |
+    {{- .Files.Get "files/observability/grafana-dashboards.yaml" | nindent 4 }}
+  prometheus.yml: |
+    global:
+      scrape_interval: 10s
+      evaluation_interval: 10s
+    rule_files:
+      - /etc/prometheus/alerts.yml
+    scrape_configs:
+      # Every pod in this namespace annotated prometheus.io/scrape, once
+      # (on the annotated port), labelled with its app name and pod name.
+      - job_name: pods
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces: { names: [{{ .Release.Namespace | quote }}] }
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            regex: "true"
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_phase]
+            regex: Succeeded|Failed
+            action: drop
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_port]
+            target_label: __tmp_port
+          - source_labels: [__meta_kubernetes_pod_container_port_number]
+            target_label: __tmp_port
+            action: keepequal
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            regex: (.+)
+            target_label: __metrics_path__
+          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+            target_label: job
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: instance
+      # The auditor pushes its result (it exits before it could be scraped).
+      - job_name: pushgateway
+        honor_labels: true
+        static_configs:
+          - targets: ["pushgateway:9091"]
+      - job_name: postgres
+        static_configs:
+          - targets: ["postgres-exporter:9187"]
+      - job_name: otel-collector
+        static_configs:
+          - targets: ["otel-collector:8888"]
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards
+  labels: {{- include "oxchange.labels" . | nindent 4 }}
+data:
+  {{- (.Files.Glob "files/observability/dashboards/*.json").AsConfig | nindent 2 }}
+---
+# Prometheus finds the pods to scrape through the Kubernetes API.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  labels: {{- include "oxchange.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: prometheus
+  labels: {{- include "oxchange.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: prometheus
+  labels: {{- include "oxchange.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: prometheus
+subjects:
+  - kind: ServiceAccount
+    name: prometheus
+    namespace: {{ .Release.Namespace }}
+{{- /*
+name, image, args, ports (name:number), the config file and where it goes,
+the data directory, the user the image runs as, memory limit, and extra env
+*/ -}}
+{{- $apps := list
+  (dict "name" "otel-collector" "image" $o.images.collector "args" (list "--config=/etc/otel/otel-collector.yaml")
+        "ports" (list (dict "name" "otlp-http" "port" 4318) (dict "name" "otlp-grpc" "port" 4317) (dict "name" "metrics" "port" 8888))
+        "files" (list (dict "key" "otel-collector.yaml" "path" "/etc/otel/otel-collector.yaml"))
+        "uid" 10001 "memory" "512Mi"
+        "env" (list (dict "name" "TRACE_KEEP_PERCENT" "value" (toString $o.traceKeepPercent))))
+  (dict "name" "tempo" "image" $o.images.tempo "args" (list "-config.file=/etc/tempo/tempo.yaml")
+        "ports" (list (dict "name" "http" "port" 3200) (dict "name" "otlp-grpc" "port" 4317))
+        "files" (list (dict "key" "tempo.yaml" "path" "/etc/tempo/tempo.yaml"))
+        "data" "/var/tempo" "uid" 10001 "memory" "512Mi")
+  (dict "name" "loki" "image" $o.images.loki "args" (list "-config.file=/etc/loki/loki.yaml")
+        "ports" (list (dict "name" "http" "port" 3100))
+        "files" (list (dict "key" "loki.yaml" "path" "/etc/loki/loki.yaml"))
+        "data" "/loki" "uid" 10001 "memory" "512Mi")
+  (dict "name" "prometheus" "image" $o.images.prometheus
+        "args" (list "--config.file=/etc/prometheus/prometheus.yml" "--storage.tsdb.path=/prometheus" (printf "--storage.tsdb.retention.time=%s" $o.prometheusRetention))
+        "ports" (list (dict "name" "http" "port" 9090))
+        "files" (list (dict "key" "prometheus.yml" "path" "/etc/prometheus/prometheus.yml") (dict "key" "alerts.yml" "path" "/etc/prometheus/alerts.yml"))
+        "data" "/prometheus" "uid" 65534 "memory" "1Gi" "serviceAccount" "prometheus")
+  (dict "name" "pushgateway" "image" $o.images.pushgateway
+        "ports" (list (dict "name" "http" "port" 9091)) "uid" 65534 "memory" "64Mi")
+  (dict "name" "postgres-exporter" "image" $o.images.postgresExporter
+        "ports" (list (dict "name" "http" "port" 9187)) "uid" 65534 "memory" "64Mi" "postgres" true)
+}}
+{{- range $app := $apps }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $app.name }}
+  labels: {{- include "oxchange.labels" $root | nindent 4 }}
+spec:
+  selector: { app.kubernetes.io/name: {{ $app.name }} }
+  ports:
+    {{- range $p := $app.ports }}
+    - { name: {{ $p.name }}, port: {{ $p.port }} }
+    {{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $app.name }}
+  labels: {{- include "oxchange.labels" $root | nindent 4 }}
+spec:
+  replicas: 1
+  # One copy at a time: the collector's tail sampling and these single-disk
+  # stores both need every piece of a trace or series in one place.
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app.kubernetes.io/name: {{ $app.name }} }
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ $app.name }}
+        {{- include "oxchange.labels" $root | nindent 8 }}
+      annotations:
+        # Restart when the shared configuration changes.
+        checksum/config: {{ ($root.Files.Glob "files/observability/**").AsConfig | sha256sum | trunc 16 }}
+    spec:
+      {{- if $app.serviceAccount }}
+      serviceAccountName: {{ $app.serviceAccount }}
+      {{- else }}
+      automountServiceAccountToken: false
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: {{ $app.uid }}
+        runAsGroup: {{ $app.uid }}
+        fsGroup: {{ $app.uid }}
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: {{ $app.name }}
+          image: {{ $app.image }}
+          {{- if $app.args }}
+          args:
+            {{- range $a := $app.args }}
+            - {{ $a | quote }}
+            {{- end }}
+          {{- end }}
+          {{- include "oxchange.containerSecurity" $root | nindent 10 }}
+          env:
+            {{- range $e := $app.env }}
+            - { name: {{ $e.name }}, value: {{ $e.value | quote }} }
+            {{- end }}
+            {{- if $app.postgres }}
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef: { name: oxchange-db, key: postgres }
+            - { name: DATA_SOURCE_URI, value: "postgres:5432/postgres?sslmode=disable" }
+            - { name: DATA_SOURCE_USER, value: postgres }
+            - { name: DATA_SOURCE_PASS, value: "$(PGPASSWORD)" }
+            {{- end }}
+          ports:
+            {{- range $p := $app.ports }}
+            - { name: {{ $p.name }}, containerPort: {{ $p.port }} }
+            {{- end }}
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: {{ $app.memory }} }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+            {{- if $app.data }}
+            - { name: data, mountPath: {{ $app.data }} }
+            {{- end }}
+            {{- range $f := $app.files }}
+            - { name: config, mountPath: {{ $f.path }}, subPath: {{ $f.key }}, readOnly: true }
+            {{- end }}
+      volumes:
+        - { name: tmp, emptyDir: {} }
+        {{- if $app.data }}
+        - { name: data, emptyDir: {} }
+        {{- end }}
+        {{- if $app.files }}
+        - name: config
+          configMap: { name: observability }
+        {{- end }}
+{{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  labels: {{- include "oxchange.labels" . | nindent 4 }}
+spec:
+  type: {{ $o.grafana.service.type }}
+  selector: { app.kubernetes.io/name: grafana }
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+      {{- if and (eq $o.grafana.service.type "NodePort") $o.grafana.service.nodePort }}
+      nodePort: {{ $o.grafana.service.nodePort }}
+      {{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  labels: {{- include "oxchange.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app.kubernetes.io/name: grafana }
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: grafana
+        {{- include "oxchange.labels" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ (.Files.Glob "files/observability/**").AsConfig | sha256sum | trunc 16 }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 472
+        runAsGroup: 472
+        fsGroup: 472
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: grafana
+          image: {{ $o.images.grafana }}
+          {{- include "oxchange.containerSecurity" . | nindent 10 }}
+          env:
+            # Anyone who can reach it may look; changing it needs the admin
+            # password: kubectl -n NAMESPACE get secret oxchange-grafana
+            - { name: GF_AUTH_ANONYMOUS_ENABLED, value: "true" }
+            - { name: GF_AUTH_ANONYMOUS_ORG_ROLE, value: Viewer }
+            - { name: GF_ANALYTICS_REPORTING_ENABLED, value: "false" }
+            - { name: GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH, value: /etc/grafana/dashboards/overview.json }
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: oxchange-grafana, key: admin-password }
+          ports:
+            - { name: http, containerPort: 3000 }
+          readinessProbe:
+            httpGet: { path: /api/health, port: http }
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 512Mi }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+            - { name: data, mountPath: /var/lib/grafana }
+            - { name: config, mountPath: /etc/grafana/provisioning/datasources/oxchange.yaml, subPath: grafana-datasources.yaml, readOnly: true }
+            - { name: config, mountPath: /etc/grafana/provisioning/dashboards/oxchange.yaml, subPath: grafana-dashboards.yaml, readOnly: true }
+            - { name: dashboards, mountPath: /etc/grafana/dashboards, readOnly: true }
+      volumes:
+        - { name: tmp, emptyDir: {} }
+        - { name: data, emptyDir: {} }
+        - name: config
+          configMap: { name: observability }
+        - name: dashboards
+          configMap: { name: grafana-dashboards }
+{{- end }}

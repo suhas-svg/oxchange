@@ -27,7 +27,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use domain::{Side, Symbol};
-use order_book::Command;
+use order_book::{Command, CommandBody};
 use thiserror::Error;
 
 use crate::codec;
@@ -312,6 +312,43 @@ fn read_loop(
     Ok(())
 }
 
+/// The matcher's metric handles, looked up once rather than per command.
+/// Each record is a few atomic operations into fixed-size buckets, so
+/// measuring does not slow matching down.
+struct MatcherMetrics {
+    new_orders: metrics::Counter,
+    cancels: metrics::Counter,
+    duplicates: metrics::Counter,
+    seconds: metrics::Histogram,
+}
+
+impl MatcherMetrics {
+    fn new() -> Self {
+        Self {
+            new_orders: metrics::counter!("matcher_commands_total", "type" => "new_order"),
+            cancels: metrics::counter!("matcher_commands_total", "type" => "cancel_order"),
+            duplicates: metrics::counter!("matcher_duplicates_total"),
+            seconds: metrics::histogram!("matcher_command_seconds"),
+        }
+    }
+}
+
+/// A span for a command whose trace is sampled, continuing that trace.
+fn command_span(headers: &[Header]) -> Option<tracing::Span> {
+    let tp = telemetry::traceparent_header(headers)?;
+    if !telemetry::is_sampled(tp) {
+        return None;
+    }
+    let span = tracing::info_span!(
+        "match",
+        otel.name = "match command",
+        otel.kind = "consumer",
+        trace_id = tracing::field::Empty,
+    );
+    telemetry::follow(&span, Some(tp));
+    Some(span)
+}
+
 fn match_loop(
     mut engine: Engine,
     rx: &Receiver<Input>,
@@ -322,6 +359,7 @@ fn match_loop(
     let mut report = PipelineReport::default();
     let mut events = Vec::with_capacity(16);
     let mut halted = None;
+    let metrics = MatcherMetrics::new();
 
     'commands: loop {
         // Between commands: answer any waiting book queries.
@@ -338,6 +376,10 @@ fn match_loop(
                 cmd,
                 headers,
             } => {
+                let started = Instant::now();
+                // One span per sampled command, never per internal step.
+                let span = command_span(&headers);
+                let _entered = span.as_ref().map(tracing::Span::enter);
                 let outcome = match engine.process(offset, &symbol, &cmd, &mut events) {
                     Ok(o) => o,
                     Err(e) => {
@@ -346,12 +388,21 @@ fn match_loop(
                         break 'commands;
                     }
                 };
+                metrics.seconds.record(started.elapsed().as_secs_f64());
+                match &cmd.body {
+                    CommandBody::NewOrder(_) => metrics.new_orders.increment(1),
+                    CommandBody::CancelOrder(_) => metrics.cancels.increment(1),
+                }
                 match outcome {
                     ProcessOutcome::Applied => report.commands_applied += 1,
                     ProcessOutcome::AlreadyApplied => report.already_applied += 1,
-                    ProcessOutcome::DuplicateCommand => report.duplicate_commands += 1,
+                    ProcessOutcome::DuplicateCommand => {
+                        report.duplicate_commands += 1;
+                        metrics.duplicates.increment(1);
+                    }
                     ProcessOutcome::DuplicateOrderId => {
                         report.duplicate_order_ids += 1;
+                        metrics.duplicates.increment(1);
                         tracing::warn!(offset, command_id = %cmd.command_id,
                             "duplicate order id escaped the duplicate memory");
                     }

@@ -8,6 +8,8 @@ license.workspace = true
 publish = false
 
 [dependencies]
+telemetry = { workspace = true, features = ["axum", "sqlx"] }
+metrics.workspace = true
 axum = { workspace = true, features = ["ws"] }
 base64.workspace = true
 consumer.workspace = true
@@ -23,7 +25,6 @@ sqlx.workspace = true
 time.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 tracing.workspace = true
-tracing-subscriber.workspace = true
 uuid.workspace = true
 rdkafka = { workspace = true, optional = true }
 

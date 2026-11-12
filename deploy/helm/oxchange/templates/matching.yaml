@@ -31,6 +31,8 @@ spec:
       labels:
         app.kubernetes.io/name: matching
         {{- include "oxchange.labels" . | nindent 8 }}
+      annotations:
+        {{- include "oxchange.scrape" (list 9464 "") | nindent 8 }}
     spec:
       {{- include "oxchange.podSecurity" . | nindent 6 }}
       # The spec's shutdown budget is 25 s; leave room before SIGKILL.
@@ -45,9 +47,11 @@ spec:
             - { name: KAFKA_BROKERS, value: {{ include "oxchange.kafkaBrokers" . | quote }} }
             - { name: SNAPSHOT_DIR, value: /var/lib/matching }
             - { name: SNAPSHOT_INTERVAL, value: {{ .Values.matching.snapshotInterval | quote }} }
+            {{- include "oxchange.telemetryEnv" . | nindent 12 }}
             - { name: RUST_LOG, value: {{ .Values.logLevel | quote }} }
           ports:
             - { name: grpc, containerPort: 50051 }
+            - { name: metrics, containerPort: 9464 }
             - { name: health, containerPort: 8081 }
           # No startup probe: /healthz answers from the first moment, and
           # /readyz turns 200 only once replay has finished.

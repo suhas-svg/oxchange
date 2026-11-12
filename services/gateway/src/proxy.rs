@@ -57,6 +57,7 @@ pub async fn forward(
             return Err(ApiError::unavailable("the service is unavailable; retry"));
         }
         Err(_) => {
+            tracing::warn!(%base, "upstream request timed out");
             return Err(ApiError::unavailable(
                 "the service did not answer in time; retry",
             ));

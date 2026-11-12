@@ -131,9 +131,12 @@ pub fn router(gw: Arc<Gateway>) -> Router {
 }
 
 /// Gives each request a new trace ID, returned in `X-Trace-Id`. Clients
-/// cannot supply their own: the trace starts here.
+/// cannot supply their own: the trace starts here. With telemetry on, it is
+/// the ID of the request's span (`telemetry::server::ServerLayer::edge`), so
+/// the same ID finds the trace in Tempo and the logs in Loki.
 async fn trace(req: Request, next: Next) -> Response {
-    let id = Uuid::new_v4().simple().to_string();
+    let id = telemetry::trace_id_of(&tracing::Span::current())
+        .unwrap_or_else(|| Uuid::new_v4().simple().to_string());
     let mut r = error::TRACE_ID.scope(id.clone(), next.run(req)).await;
     if let Ok(v) = HeaderValue::from_str(&id) {
         r.headers_mut().insert("x-trace-id", v);
@@ -145,6 +148,11 @@ async fn trace(req: Request, next: Next) -> Response {
 pub fn grpc<T>(msg: T) -> tonic::Request<T> {
     let mut r = tonic::Request::new(msg);
     r.set_timeout(UPSTREAM_TIMEOUT);
+    telemetry::inject_metadata(r.metadata_mut());
+    if r.metadata().contains_key("traceparent") {
+        return r;
+    }
+    // No span (telemetry off): still pass the trace ID along.
     let trace = error::trace_id();
     if trace.len() == 32 {
         let span = &Uuid::new_v4().simple().to_string()[..16];
