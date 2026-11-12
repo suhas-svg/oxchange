@@ -15,3 +15,14 @@ Open the dashboard:
 
 Run the auditor now, without waiting for its 5-minute schedule:
   kubectl -n {{ .Release.Namespace }} create job --from=cronjob/auditor auditor-now
+{{- if .Values.observability.enabled }}
+
+Grafana (four dashboards in the Oxchange folder; anyone may view):
+{{- if eq .Values.observability.grafana.service.type "NodePort" }}
+  http://localhost:3001/   (the port mapping scripts/k8s.sh sets up)
+{{- else }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/grafana 3001:3000
+  then http://localhost:3001/
+{{- end }}
+  Admin password: kubectl -n {{ .Release.Namespace }} get secret oxchange-grafana -o jsonpath='{.data.admin-password}' | base64 -d
+{{- end }}

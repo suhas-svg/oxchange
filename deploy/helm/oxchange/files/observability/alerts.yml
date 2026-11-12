@@ -1,0 +1,74 @@
+# The spec's alerts ("Observability → Alerts"), plus "Service down".
+# Each links to its runbook in docs/runbooks/.
+groups:
+  - name: money-safety
+    rules:
+      - alert: LedgerImbalance
+        # Pushed by the auditor: rules broken in its last run.
+        expr: max(ledger_imbalance_total) > 0
+        labels: { severity: critical }
+        annotations:
+          summary: "The auditor found {{ $value }} broken rule(s): balances may be wrong"
+          runbook: docs/runbooks/ledger-imbalance.md
+
+      - alert: EventSequenceGap
+        expr: sum by (service) (consumer_seq_gaps_total) > 0
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.service }} saw a jump in matching.events seq: events are missing and the partition is halted"
+          runbook: docs/runbooks/event-sequence-gap.md
+
+      - alert: SettlementHalted
+        # A trade waiting over 60 s, or a halted settlement partition.
+        expr: >-
+          max(settlement_oldest_pending_seconds) > 60
+          or max(consumer_halted{service="settlement"}) > 0
+        labels: { severity: critical }
+        annotations:
+          summary: "Trades are not settling (oldest pending {{ $value | humanizeDuration }})"
+          runbook: docs/runbooks/settlement-halted.md
+
+  - name: matching
+    rules:
+      - alert: MatcherDown
+        expr: up{job="matching"} == 0 or matcher_ready == 0
+        for: 30s
+        labels: { severity: critical }
+        annotations:
+          summary: "Matcher {{ $labels.instance }} has had no live, ready engine for 30 s"
+          runbook: docs/runbooks/matcher-down.md
+
+  - name: pipeline
+    rules:
+      - alert: OutboxBackingUp
+        expr: max by (service) (outbox_unpublished) > 10000
+        for: 1m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.service }} has {{ $value }} outbox rows waiting for Kafka"
+          runbook: docs/runbooks/outbox-backing-up.md
+
+      - alert: ConsumerLag
+        expr: max by (service, topic, partition) (consumer_lag) > 50000
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.service }} is {{ $value }} events behind on {{ $labels.topic }}/{{ $labels.partition }}"
+          runbook: docs/runbooks/consumer-lag.md
+
+      - alert: OrderLatency
+        # Order saved by Risk to the matcher's answer reaching Risk.
+        expr: histogram_quantile(0.99, sum by (le) (rate(order_end_to_end_seconds_bucket[5m]))) > 0.1
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "End-to-end order p99 is {{ $value | humanizeDuration }} (target 100 ms)"
+          runbook: docs/runbooks/order-latency.md
+
+      - alert: ServiceDown
+        expr: up{job!="matching"} == 0
+        for: 1m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.job }} at {{ $labels.instance }} cannot be scraped"
+          runbook: docs/runbooks/service-down.md

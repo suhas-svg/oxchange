@@ -44,7 +44,8 @@ impl AccountsApi for GrpcAccounts {
         r: pb::SettleTradeRequest,
     ) -> Result<pb::SettleTradeResponse, Status> {
         let mut c = self.client.clone();
-        match tokio::time::timeout(SETTLE_TIMEOUT, c.settle_trade(r)).await {
+        match tokio::time::timeout(SETTLE_TIMEOUT, c.settle_trade(telemetry::grpc_request(r))).await
+        {
             Ok(r) => r.map(tonic::Response::into_inner),
             Err(_) => Err(Status::deadline_exceeded("accounts did not answer in time")),
         }

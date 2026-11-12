@@ -23,7 +23,6 @@ use settlement::{GrpcAccounts, MATCHING_EVENTS_TOPIC, MIGRATOR, OUTBOX_LOCK_KEY,
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 use tokio::sync::watch;
-use tracing_subscriber::EnvFilter;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -86,6 +85,7 @@ async fn serve() -> Result<(), BoxError> {
     let brokers = env("KAFKA_BROKERS")?;
     let accounts = GrpcAccounts::connect_lazy(&env("ACCOUNTS_GRPC_URL")?)?;
     let pool = connect().await?;
+    telemetry::watch_pool(pool.clone());
     let health_addr = env_or("HEALTH_ADDR", "0.0.0.0:8081");
     let settlement = Arc::new(Settlement::new(pool.clone(), accounts));
     let (stop_tx, stop_rx) = watch::channel(false);
@@ -101,6 +101,33 @@ async fn serve() -> Result<(), BoxError> {
         let _ = axum::serve(health_listener, health)
             .with_graceful_shutdown(health_stop)
             .await;
+    });
+
+    // Every 5 s: settlement_pending (trades not yet settled) and
+    // settlement_oldest_pending_seconds, which drives the "Settlement
+    // halted" alert (a trade waiting over 60 s).
+    let p = pool.clone();
+    let mut stop = stop_rx.clone();
+    tasks.spawn(async move {
+        let pending = metrics::gauge!("settlement_pending");
+        let oldest = metrics::gauge!("settlement_oldest_pending_seconds");
+        loop {
+            let row: Result<(i64, f64), _> = sqlx::query_as(
+                "SELECT count(*),
+                        coalesce(extract(epoch FROM now() - min(executed_at)), 0)::float8
+                 FROM trades WHERE status = 'PENDING'",
+            )
+            .fetch_one(&p)
+            .await;
+            if let Ok((n, age)) = row {
+                pending.set(n as f64);
+                oldest.set(age);
+            }
+            tokio::select! {
+                _ = stop.wait_for(|s| *s) => return,
+                () = tokio::time::sleep(Duration::from_secs(5)) => {}
+            }
+        }
     });
 
     // Outbox relay: settlement.events.
@@ -161,11 +188,11 @@ async fn serve() -> Result<(), BoxError> {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    tracing_subscriber::fmt()
-        .json()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-        .init();
     let args: Vec<String> = std::env::args().collect();
+    let _telemetry = telemetry::init_with(
+        "settlement",
+        telemetry::Mode::for_command(args.get(1).map(String::as_str)),
+    );
     let result = match args.get(1).map(String::as_str) {
         None | Some("serve") => serve().await,
         Some("migrate") => {

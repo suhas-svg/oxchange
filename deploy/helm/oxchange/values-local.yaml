@@ -1,6 +1,6 @@
 # A single-node laptop cluster (k3d), as scripts/k8s.sh up creates it:
 # locally built images, small CPU requests, and the dashboard on a NodePort
-# that k3d maps to http://localhost:3000.
+# that k3d maps to http://localhost:3000, and Grafana at http://localhost:3001.
 
 image:
   repository: oxchange
@@ -28,3 +28,9 @@ postgres:
   storage: 2Gi
 redpanda:
   storage: 2Gi
+
+observability:
+  grafana:
+    service:
+      type: NodePort
+      nodePort: 30081

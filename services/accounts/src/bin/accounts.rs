@@ -22,7 +22,6 @@ use axum::http::StatusCode;
 use axum::routing::get;
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
-use tracing_subscriber::EnvFilter;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -112,6 +111,7 @@ async fn shutdown_signal() {
 async fn serve() -> Result<(), BoxError> {
     let signer = signer()?;
     let pool = connect().await?;
+    telemetry::watch_pool(pool.clone());
     let listen = env_or("LISTEN_ADDR", "0.0.0.0:50051").parse()?;
     let health_addr = env_or("HEALTH_ADDR", "0.0.0.0:8081");
 
@@ -144,6 +144,7 @@ async fn serve() -> Result<(), BoxError> {
     let accounts = Arc::new(Accounts::new(pool, signer));
     tracing::info!(%listen, health = %health_addr, "accounts serving");
     tonic::transport::Server::builder()
+        .layer(telemetry::server::ServerLayer::grpc())
         .add_service(grpc::Service::server(accounts))
         .serve_with_shutdown(listen, shutdown_signal())
         .await?;
@@ -152,11 +153,11 @@ async fn serve() -> Result<(), BoxError> {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    tracing_subscriber::fmt()
-        .json()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-        .init();
     let args: Vec<String> = std::env::args().collect();
+    let _telemetry = telemetry::init_with(
+        "accounts",
+        telemetry::Mode::for_command(args.get(1).map(String::as_str)),
+    );
     let result = match args.get(1).map(String::as_str) {
         None | Some("serve") => serve().await,
         Some("migrate") => {

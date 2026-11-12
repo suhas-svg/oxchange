@@ -60,6 +60,11 @@ pub async fn claim(conn: &mut PgConnection, symbol: &str, seq: u64) -> sqlx::Res
             .fetch_one(&mut *conn)
             .await?;
     let decision = decide(u64::try_from(last).unwrap_or(0), seq);
+    if let Decision::Gap { .. } = decision {
+        // Spec alert "Event sequence gap": must stay 0.
+        // The log line (from the caller's halt) names the stock.
+        metrics::counter!("consumer_seq_gaps_total").increment(1);
+    }
     if decision == Decision::Apply {
         sqlx::query("UPDATE consumer_progress SET last_seq = $2 WHERE symbol = $1")
             .bind(symbol)

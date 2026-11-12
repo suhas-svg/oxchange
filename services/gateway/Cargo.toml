@@ -8,6 +8,8 @@ license.workspace = true
 publish = false
 
 [dependencies]
+telemetry = { workspace = true, features = ["axum", "grpc"] }
+metrics.workspace = true
 auth.workspace = true
 axum = { workspace = true, features = ["ws"] }
 bytes = "1"
@@ -25,7 +27,6 @@ tokio = { workspace = true, features = ["sync"] }
 tokio-tungstenite = "0.29"
 tonic.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]

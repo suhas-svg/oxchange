@@ -94,3 +94,27 @@ redpanda:
   resources:
     requests: { cpu: 200m, memory: 1Gi }
     limits: { memory: 1536Mi }
+
+# Metrics, traces, logs, dashboards and alerts (spec: "Observability").
+# The services export to the collector and are scraped by Prometheus;
+# Grafana shows the four dashboards. Data is kept on emptyDir volumes:
+# monitoring history, not money, so a restart may lose it.
+observability:
+  enabled: true
+  # Share of new traces the Gateway records (head sampling). The collector
+  # then keeps errors, slow traces, and traceKeepPercent of the rest.
+  traceSampleRatio: "1.0"
+  traceKeepPercent: 1
+  prometheusRetention: 3d
+  grafana:
+    service:
+      type: ClusterIP
+      nodePort: null
+  images:
+    collector: otel/opentelemetry-collector-contrib:0.116.1
+    tempo: grafana/tempo:2.6.1
+    loki: grafana/loki:3.3.2
+    prometheus: prom/prometheus:v3.1.0
+    pushgateway: prom/pushgateway:v1.10.0
+    postgresExporter: quay.io/prometheuscommunity/postgres-exporter:v0.16.0
+    grafana: grafana/grafana:11.4.0

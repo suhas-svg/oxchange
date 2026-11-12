@@ -38,7 +38,7 @@ fn err(e: impl std::fmt::Display) -> TransportError {
 // -------------------------------------------------------------------- source
 
 pub struct KafkaSource {
-    consumer: BaseConsumer,
+    consumer: BaseConsumer<InputLag>,
     /// The partition's end when we started; reaching it means replay is done.
     replay_until: u64,
     replay_started: Instant,
@@ -63,14 +63,15 @@ impl KafkaSource {
         process_started: Instant,
         ready: Arc<AtomicBool>,
     ) -> Result<Self, TransportError> {
-        let consumer: BaseConsumer = ClientConfig::new()
+        let consumer: BaseConsumer<InputLag> = ClientConfig::new()
             .set("bootstrap.servers", brokers)
             // Required by the client; nothing is ever committed under it.
             .set("group.id", format!("matching-p{partition}"))
             .set("enable.auto.commit", "false")
             .set("enable.auto.offset.store", "false")
             .set("enable.partition.eof", "false")
-            .create()
+            .set("statistics.interval.ms", "5000")
+            .create_with_context(InputLag)
             .map_err(err)?;
 
         let (low, high) = consumer
@@ -105,6 +106,7 @@ impl KafkaSource {
             replay = high - next_offset,
             "reading orders.commands"
         );
+        metrics::gauge!("matcher_ready").set(0.0);
         Ok(Self {
             consumer,
             replay_until: high,
@@ -114,7 +116,7 @@ impl KafkaSource {
         })
         .inspect(|s| {
             if s.replay_done {
-                s.ready.store(true, Ordering::Relaxed);
+                s.mark_ready();
                 tracing::info!(
                     recovery_ms = process_started.elapsed().as_millis() as u64,
                     "nothing to replay; matcher is ready"
@@ -124,16 +126,48 @@ impl KafkaSource {
     }
 }
 
+/// Sets `matcher_input_lag` from librdkafka's statistics (every 5 s): the
+/// partition's log end minus the next command to hand to the engine.
+pub struct InputLag;
+
+impl ClientContext for InputLag {
+    fn stats(&self, s: rdkafka::Statistics) {
+        let Some(t) = s.topics.get(COMMANDS_TOPIC) else {
+            return;
+        };
+        for (partition, p) in &t.partitions {
+            if *partition >= 0 && p.hi_offset >= 0 && p.app_offset >= 0 {
+                metrics::gauge!("matcher_input_lag")
+                    .set((p.hi_offset - p.app_offset).max(0) as f64);
+            }
+        }
+    }
+}
+
+impl rdkafka::consumer::ConsumerContext for InputLag {}
+
+impl KafkaSource {
+    /// Replay is over: ready for traffic, and the restart time is known.
+    fn mark_ready(&self) {
+        self.ready.store(true, Ordering::Relaxed);
+        metrics::gauge!("matcher_ready").set(1.0);
+        metrics::histogram!("matcher_recovery_seconds")
+            .record(self.replay_started.elapsed().as_secs_f64());
+    }
+}
+
 impl CommandSource for KafkaSource {
     fn fetch(&mut self) -> Result<Fetched, TransportError> {
         let Some(result) = self.consumer.poll(POLL) else {
+            // Nothing arrived for a whole poll: caught up.
+            metrics::gauge!("matcher_input_lag").set(0.0);
             return Ok(Fetched::Idle);
         };
         let msg = result.map_err(err)?;
         let offset = msg.offset() as u64;
         if !self.replay_done && offset + 1 >= self.replay_until {
             self.replay_done = true;
-            self.ready.store(true, Ordering::Relaxed);
+            self.mark_ready();
             tracing::info!(
                 recovery_ms = self.replay_started.elapsed().as_millis() as u64,
                 "replay complete; matcher is ready"

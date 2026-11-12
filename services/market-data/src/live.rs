@@ -604,6 +604,7 @@ impl BookSource for GrpcBooks {
             let req = mpb::GetBookRequest {
                 symbol: symbol.to_owned(),
             };
+            let req = telemetry::grpc_request(req);
             async move { c.get_book(req).await.map(tonic::Response::into_inner) }
         };
         let to_snapshot = |r: mpb::GetBookResponse| Snapshot {

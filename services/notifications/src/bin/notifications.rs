@@ -22,7 +22,6 @@ use notifications::{Failure, GROUP, Hub, MIGRATOR, Notifier, TOPICS};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 use tokio::sync::watch;
-use tracing_subscriber::EnvFilter;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -78,6 +77,7 @@ async fn serve() -> Result<(), BoxError> {
     let brokers = env("KAFKA_BROKERS")?;
     let redis_url = env("REDIS_URL")?;
     let pool = connect().await?;
+    telemetry::watch_pool(pool.clone());
     let http_addr = env_or("HTTP_ADDR", "0.0.0.0:8080");
     let notifier = Arc::new(Notifier::new(pool, Arc::new(Publisher::new(&redis_url)?)));
     let hub = Arc::new(Hub::default());
@@ -92,9 +92,28 @@ async fn serve() -> Result<(), BoxError> {
     let listener = tokio::net::TcpListener::bind(&http_addr).await?;
     let http_stop = stopped(stop_rx.clone());
     tasks.spawn(async move {
-        let _ = axum::serve(listener, router(app))
-            .with_graceful_shutdown(http_stop)
-            .await;
+        let _ = axum::serve(
+            listener,
+            router(app).layer(telemetry::server::ServerLayer::http()),
+        )
+        .with_graceful_shutdown(http_stop)
+        .await;
+    });
+
+    // websocket_clients and websocket_dropped_slow_total, every 5 s.
+    let l = hub.clone();
+    let mut stop = stop_rx.clone();
+    tasks.spawn(async move {
+        let clients = metrics::gauge!("websocket_clients");
+        let dropped = metrics::counter!("websocket_dropped_slow_total");
+        loop {
+            clients.set(l.clients() as f64);
+            dropped.absolute(l.dropped_slow.load(std::sync::atomic::Ordering::Relaxed));
+            tokio::select! {
+                _ = stop.wait_for(|s| *s) => return,
+                () = tokio::time::sleep(Duration::from_secs(5)) => {}
+            }
+        }
     });
 
     // Wake-ups from every copy, for the sockets this copy holds.
@@ -175,11 +194,11 @@ async fn serve() -> Result<(), BoxError> {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    tracing_subscriber::fmt()
-        .json()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-        .init();
     let args: Vec<String> = std::env::args().collect();
+    let _telemetry = telemetry::init_with(
+        "notifications",
+        telemetry::Mode::for_command(args.get(1).map(String::as_str)),
+    );
     let result = match args.get(1).map(String::as_str) {
         None | Some("serve") => serve().await,
         Some("migrate") => {

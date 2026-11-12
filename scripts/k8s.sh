@@ -29,6 +29,7 @@ cd "$(dirname "$0")/.."
 CLUSTER=${CLUSTER:-oxchange}
 NS=${NAMESPACE:-oxchange}
 WEB_PORT=${WEB_PORT:-3000}
+GRAFANA_PORT=${GRAFANA_PORT:-3001}
 API_PORT=${API_PORT:-6550}
 K3D_IMAGE=${K3D_IMAGE:-ghcr.io/k3d-io/k3d:5.7.5}
 # The images to run, as name:tag. They are loaded into the cluster from
@@ -60,7 +61,7 @@ up() {
     # maps to localhost.
     k3d cluster create "$CLUSTER" --servers 1 --agents 0 \
       --api-port "127.0.0.1:$API_PORT" \
-      -p "$WEB_PORT:30080@server:0" \
+      -p "$WEB_PORT:30080@server:0"       -p "$GRAFANA_PORT:30081@server:0" \
       --k3s-arg "--disable=traefik@server:0" \
       --kubeconfig-update-default=false --wait
   fi
@@ -104,6 +105,12 @@ up() {
     for d in $(kc get deployment -o name); do kc rollout status "$d" --timeout=180s >/dev/null; done
   fi
   echo "== ready: http://localhost:$WEB_PORT"
+  if docker port "k3d-$CLUSTER-serverlb" 2>/dev/null | grep -q '^30081/'; then
+    echo "== Grafana: http://localhost:$GRAFANA_PORT"
+  else
+    # Clusters made before Grafana existed have no port for it.
+    echo "== Grafana: kubectl -n $NS port-forward svc/grafana $GRAFANA_PORT:3000 (or recreate the cluster: down, then up)"
+  fi
 }
 
 audit() {

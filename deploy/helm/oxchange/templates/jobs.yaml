@@ -73,4 +73,9 @@ spec:
                 - { name: RISK_DATABASE_URL, value: "postgres://auditor:$(AUDITOR_PASSWORD)@postgres:5432/risk" }
                 - { name: SETTLEMENT_DATABASE_URL, value: "postgres://auditor:$(AUDITOR_PASSWORD)@postgres:5432/settlement" }
                 - { name: KAFKA_BROKERS, value: {{ include "oxchange.kafkaBrokers" . | quote }} }
+                {{- if .Values.observability.enabled }}
+                # Prometheus cannot scrape a job that has exited; it pushes.
+                - { name: PUSHGATEWAY_URL, value: "http://pushgateway:9091" }
+                - { name: OTEL_EXPORTER_OTLP_ENDPOINT, value: "http://otel-collector:4318" }
+                {{- end }}
                 - { name: RUST_LOG, value: {{ .Values.logLevel | quote }} }

@@ -111,13 +111,7 @@ Connection: close
 }
 
 fn main() -> ExitCode {
-    tracing_subscriber::fmt()
-        .json()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    let _telemetry = telemetry::init("matching");
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -176,6 +170,7 @@ fn run() -> Result<(), String> {
             rt.block_on(async move {
                 tracing::info!(%addr, "GetBook listening");
                 if let Err(e) = tonic::transport::Server::builder()
+                    .layer(telemetry::server::ServerLayer::grpc())
                     .add_service(matching::grpc::Service::server(queries_tx))
                     .serve(addr)
                     .await

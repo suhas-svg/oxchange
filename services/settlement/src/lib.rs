@@ -170,15 +170,18 @@ impl<A: AccountsApi> Settlement<A> {
         )));
 
         let mut tx = self.pool.begin().await.map_err(db_error)?;
-        let settled: Option<(OffsetDateTime,)> = sqlx::query_as(
+        // Also returns the spec's "trade to final balance" delay.
+        let settled: Option<(OffsetDateTime, f64)> = sqlx::query_as(
             "UPDATE trades SET status = 'SETTLED', settled_at = now()
-             WHERE trade_id = $1 AND status = 'PENDING' RETURNING settled_at",
+             WHERE trade_id = $1 AND status = 'PENDING'
+             RETURNING settled_at, extract(epoch FROM clock_timestamp() - executed_at)::float8",
         )
         .bind(trade_id)
         .fetch_optional(&mut *tx)
         .await
         .map_err(db_error)?;
-        if let Some((at,)) = settled {
+        if let Some((at, delay)) = settled {
+            metrics::histogram!("settlement_seconds").record(delay);
             let msg = ev::TradeSettled {
                 trade_id: trade_id.to_owned(),
                 symbol,

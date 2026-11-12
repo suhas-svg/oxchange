@@ -1,0 +1,42 @@
+[package]
+name = "telemetry"
+description = "Shared metrics, tracing and logging: JSON logs, OpenTelemetry traces and logs over OTLP, Prometheus metrics."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+http.workspace = true
+metrics.workspace = true
+metrics-exporter-prometheus.workspace = true
+metrics-process.workspace = true
+opentelemetry.workspace = true
+opentelemetry_sdk.workspace = true
+opentelemetry-otlp.workspace = true
+opentelemetry-appender-tracing.workspace = true
+tokio.workspace = true
+tower.workspace = true
+tracing.workspace = true
+tracing-opentelemetry.workspace = true
+tracing-subscriber.workspace = true
+
+axum = { workspace = true, optional = true }
+sqlx = { workspace = true, optional = true }
+tonic = { workspace = true, optional = true }
+
+[features]
+# MatchedPath route labels for axum servers.
+axum = ["dep:axum"]
+# Connection-pool gauges.
+sqlx = ["dep:sqlx"]
+# Trace context in gRPC request metadata.
+grpc = ["dep:tonic"]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
+
+[lints]
+workspace = true

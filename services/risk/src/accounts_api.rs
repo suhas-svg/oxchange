@@ -57,12 +57,12 @@ async fn with_timeout<T>(
 impl AccountsApi for GrpcAccounts {
     async fn reserve(&self, r: pb::ReserveRequest) -> Result<pb::ReserveResponse, Status> {
         let mut c = self.client.clone();
-        with_timeout(RESERVE_TIMEOUT, c.reserve(r)).await
+        with_timeout(RESERVE_TIMEOUT, c.reserve(telemetry::grpc_request(r))).await
     }
 
     async fn release(&self, r: pb::ReleaseRequest) -> Result<pb::ReleaseResponse, Status> {
         let mut c = self.client.clone();
-        with_timeout(RELEASE_TIMEOUT, c.release(r)).await
+        with_timeout(RELEASE_TIMEOUT, c.release(telemetry::grpc_request(r))).await
     }
 }
 

@@ -35,6 +35,21 @@ fn reply<T>(r: crate::Result<T>) -> Reply<T> {
     r.map(Response::new).map_err(|e| status(&e))
 }
 
+/// The `result` label of `orders_received_total`.
+fn order_result(r: &crate::Result<pb::PlaceOrderResponse>) -> &'static str {
+    use crate::RiskError as E;
+    match r {
+        Ok(o) if o.existing => "repeat",
+        Ok(_) => "accepted",
+        Err(E::Validation(_) | E::SymbolNotTrading) => "invalid",
+        Err(E::RiskLimit(_)) => "risk_limit",
+        Err(E::InsufficientFunds) => "insufficient_funds",
+        Err(E::Rejected(_)) => "rejected",
+        Err(E::Unavailable(_)) => "unavailable",
+        Err(_) => "error",
+    }
+}
+
 pub struct Service<A>(pub Arc<Risk<A>>);
 
 impl<A: AccountsApi> Service<A> {
@@ -49,7 +64,9 @@ impl<A: AccountsApi> RiskService for Service<A> {
         &self,
         r: Request<pb::PlaceOrderRequest>,
     ) -> Reply<pb::PlaceOrderResponse> {
-        reply(self.0.place_order(&r.into_inner()).await)
+        let result = self.0.place_order(&r.into_inner()).await;
+        metrics::counter!("orders_received_total", "result" => order_result(&result)).increment(1);
+        reply(result)
     }
 
     async fn cancel_order(
