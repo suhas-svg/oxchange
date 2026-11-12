@@ -23,6 +23,8 @@ allow = [
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    # MIT-equivalent; libloading, via metrics-process -> libproc (macOS build).
+    "ISC",
     "Unicode-3.0",
     "Zlib",
 ]
