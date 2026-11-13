@@ -248,8 +248,12 @@ struct ClientOp {
 }
 
 async fn ws<B: BookSource>(State(app): State<Arc<App<B>>>, upgrade: WebSocketUpgrade) -> Response {
+    // Clients only send small subscribe requests, so a read buffer the size
+    // of the largest one is enough. The default (128 KiB per socket, taken
+    // up front) cost 750 MiB with 5,000 clients.
     upgrade
         .max_message_size(MAX_CLIENT_MESSAGE)
+        .read_buffer_size(MAX_CLIENT_MESSAGE)
         .on_upgrade(move |socket| client(app, socket))
 }
 

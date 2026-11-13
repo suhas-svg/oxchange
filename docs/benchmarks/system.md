@@ -2,12 +2,12 @@
 
 The whole system under the spec's load-test workload: every service, Redpanda,
 PostgreSQL, Redis and the observability stack, on one laptop. Recorded
-2026-11-12; sections 4–6 were added on 2026-11-13, after the consumers
+2026-11-12; sections 4–7 were added on 2026-11-13, after the consumers
 began applying events in batches. The matching engine
 on its own is in [matcher.md](matcher.md).
 
 **In short:** on this laptop the system met every latency target at **50
-orders/s**, accepts up to **300 orders/s** for a minute, and recovers a
+orders/s** (public updates measured with 20 clients), accepts up to **300 orders/s** for a minute, and recovers a
 matcher with **138,000 commands to replay in 6.7 s**. It is far from the
 spec's 2,000 orders/s. The disk is the first limit (about 10 orders/s with
 PostgreSQL on it). With the disk out of the way, the services consuming
@@ -17,7 +17,9 @@ with 200 orders/s for 30 minutes** (0 events behind at the end, against
 540,000–770,000 before). At 250–300 orders/s the limit is CPU: PostgreSQL
 and every service share the laptop's 12 threads, and Accounts' connections
 wait on PostgreSQL, not on the pool. Memory stays flat for **an hour at
-100 orders/s**.
+100 orders/s**. With **5,000 public clients** every price update arrives,
+but p99 is 0.7–2.7 s against a 100 ms target, with the clients on the same
+laptop.
 
 ## Results against the targets
 
@@ -29,7 +31,7 @@ wait on PostgreSQL, not on the pool. Memory stays flat for **an hour at
 | Order accepted response | p99 ≤ 50 ms | 46 ms at 50/s; 67 ms at 100/s; 264 ms at 200/s sustained | Pass at 50/s only |
 | Order to fill notification | p99 ≤ 100 ms | 47 ms at 50/s; 79 ms at 100/s | Pass up to 100/s |
 | Trade to final balance | p99 ≤ 250 ms | 92 ms at 50/s; 180 ms at 100/s | Pass up to 100/s |
-| Trade to public price update | p99 ≤ 100 ms with 5,000 clients | 26 ms at 50/s, 75 ms at 100/s, **with 20 clients** | Pass, but not at the spec's client count |
+| Trade to public price update | p99 ≤ 100 ms with 5,000 clients | 26 ms at 50/s with 20 clients; **0.7–2.7 s with 5,000**, clients on the same machine ([section 7](#7-5000-public-clients)) | **Miss** |
 | Matcher recovery | ≤ 10 s with 100,000 commands to replay | 6.7 s with 138,181; 4.2 s with 85,817 | Pass |
 | Memory | No growth trend over 1 hour | 1 hour at 100/s: every service flat in the second half; Accounts holds about 1 GB after the sign-up burst ([section 6](#6-one-hour-at-100-orderss-memory)) | Pass |
 | Correctness | 0 auditor failures | 0 after all 11 failure tests, run again with batching ([failure-tests.md](../failure-tests.md)); 0 after the sustained run once consumers caught up ([below](#correctness-after-the-sustained-run)) | Pass |
@@ -341,6 +343,40 @@ test reproduces it: 500 sign-ups take an idle Accounts from 6 MiB to
 them. Capping glibc's arenas (`MALLOC_ARENA_MAX=2`) did not help (1.0 GB).
 Not yet explained; it is a fixed cost after a burst of logins, not a leak.
 
+## 7. 5,000 public clients
+
+Measured 2026-11-13: the spec's "trade to public price update with 5,000
+clients". The load generator opens that many sockets straight to Market
+Data, each subscribed to trades for all 20 stocks, so every trade becomes
+5,000 messages (about 29,000 a second at 50 orders/s). Fast-disk overlay,
+60-second runs, same stack and same day.
+
+| Public clients | Rate | OK | Accepted p99 | Public trade p50 | Public trade p99 |
+|---|---|---|---|---|---|
+| 20 | 50/s | 100% | 90 ms | 13 ms | **36 ms** |
+| 20 | 100/s | 100% | 403 ms | 38 ms | 149 ms |
+| 5,000 | 50/s | 100% | 502–930 ms | 120–180 ms | **675–2,669 ms** (three runs) |
+| 5,000 | 100/s | 95.7–100% | 1,765–2,877 ms | 539–641 ms | 1,998–2,343 ms |
+
+**Every message arrived** (1.7–2.0 million per run at 50/s; none dropped as
+a slow client), but late: **the target is missed** on this machine.
+
+**Where the time goes.** Market Data used 1.2–5.5 cores writing the
+messages, and the load generator 1–2 cores reading and timing them, on the
+same 12 threads as PostgreSQL and every other service. The fan-out itself is
+cheap (each message is encoded once and queued to every subscriber); the
+cost is one WebSocket frame and one socket write per client per message.
+With the clients on the same machine, this test mostly measures the machine
+sending messages to itself; every other latency rose with it (order
+accepted p99 from 90 ms to 0.5–0.9 s). The spec's setup needs the clients on
+other machines.
+
+**One fix: memory per socket.** Each socket took a 128 KiB read buffer up
+front (axum's default), so 5,000 clients cost Market Data 786 MiB. Clients
+only send small subscribe requests, so the buffer is now the 4 KiB request
+limit: **90 MiB** with 5,000 clients. Latency did not change (675 ms at
+50/s, within the spread above).
+
 ## Where the time goes
 
 1. **The disk.** On this machine PostgreSQL's flushes are the first limit,
@@ -398,8 +434,8 @@ a machine of its own.
 
 ## Not measured
 
-- 5,000 public WebSocket clients: the runs used 20. One machine running the
-  clients and the system at once would mostly measure itself.
+- 5,000 public WebSocket clients with the clients on other machines
+  ([section 7](#7-5000-public-clients) ran them on the same one).
 - Why Accounts keeps about 1 GB after a burst of logins
   ([section 6](#6-one-hour-at-100-orderss-memory)).
 - A 3-broker cluster under load (the failure tests use one; these runs use
