@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use consumer::{Decision, HandlerError};
+use consumer::{Claims, Decision, HandlerError};
 use proto_gen::events::v1 as ev;
 use sqlx::PgPool;
 use time::OffsetDateTime;
@@ -48,26 +48,58 @@ impl Recorder {
     }
 
     pub async fn apply_event(&self, e: &ev::MatchingEvent) -> Result<(), HandlerError> {
+        self.apply_events(std::slice::from_ref(e)).await
+    }
+
+    /// Records events in order, all in one transaction, then writes each
+    /// stock's newest ticker.
+    pub async fn apply_events(&self, events: &[ev::MatchingEvent]) -> Result<(), HandlerError> {
         let mut tx = self.pool.begin().await.map_err(retry)?;
-        match consumer::claim(&mut tx, &e.symbol, e.seq)
-            .await
-            .map_err(retry)?
-        {
-            Decision::Repeat => return Ok(()),
+        let mut claims = Claims::default();
+        // symbol → (newest new trade's time, its tick without the volume).
+        let mut latest: Vec<(&str, OffsetDateTime, ticker::Tick)> = Vec::new();
+        for e in events {
+            if let Some((at, tick)) = self.record_in(&mut tx, &mut claims, e).await? {
+                match latest.iter_mut().find(|(s, ..)| *s == e.symbol) {
+                    Some(slot) => *slot = (&e.symbol, at, tick),
+                    None => latest.push((&e.symbol, at, tick)),
+                }
+            }
+        }
+        claims.save(&mut tx).await.map_err(retry)?;
+        for (symbol, at, tick) in &mut latest {
+            tick.day_volume = day_volume(&mut tx, symbol, *at).await.map_err(retry)?;
+        }
+        tx.commit().await.map_err(retry)?;
+
+        for (symbol, _, tick) in latest {
+            if let Err(err) = self.ticker.write(symbol, tick).await {
+                // Reduced mode: refresh_tickers fills it in once Redis is back.
+                tracing::warn!(%symbol, error = %err, "ticker not updated");
+            }
+        }
+        Ok(())
+    }
+
+    /// Claims one event and records it if it is a new trade. Returns the
+    /// trade's time and ticker (volume still 0) when it is one.
+    async fn record_in(
+        &self,
+        tx: &mut sqlx::PgConnection,
+        claims: &mut Claims,
+        e: &ev::MatchingEvent,
+    ) -> Result<Option<(OffsetDateTime, ticker::Tick)>, HandlerError> {
+        match claims.claim(tx, &e.symbol, e.seq).await.map_err(retry)? {
+            Decision::Repeat => return Ok(None),
             Decision::Apply => {}
             Decision::Gap { expected, got } => {
                 tracing::error!(symbol = %e.symbol, expected, got,
                     "seq gap: public trade history is missing events");
-                sqlx::query("UPDATE consumer_progress SET last_seq = $2 WHERE symbol = $1")
-                    .bind(&e.symbol)
-                    .bind(i64::try_from(e.seq).map_err(|x| HandlerError::Halt(x.to_string()))?)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(retry)?;
+                claims.skip_to(&e.symbol, e.seq);
             }
         }
         let Some(ev::matching_event::Body::Trade(t)) = &e.body else {
-            return tx.commit().await.map_err(retry);
+            return Ok(None);
         };
         let at = OffsetDateTime::from_unix_timestamp_nanos(i128::from(e.event_time_ns))
             .map_err(|x| HandlerError::Halt(format!("event time: {x}")))?;
@@ -88,7 +120,7 @@ impl Recorder {
         .rows_affected()
             == 1;
         if !new {
-            return tx.commit().await.map_err(retry);
+            return Ok(None);
         }
         sqlx::query(
             "INSERT INTO candles_1m AS c
@@ -108,20 +140,13 @@ impl Recorder {
         .execute(&mut *tx)
         .await
         .map_err(retry)?;
-        let day_volume = day_volume(&mut tx, &e.symbol, at).await.map_err(retry)?;
-        tx.commit().await.map_err(retry)?;
-
         let tick = ticker::Tick {
             last_price_cents: t.price_cents,
-            day_volume,
+            day_volume: 0,
             seq: e.seq,
             traded_at_ns: e.event_time_ns,
         };
-        if let Err(err) = self.ticker.write(&e.symbol, tick).await {
-            // Reduced mode: refresh_tickers fills it in once Redis is back.
-            tracing::warn!(symbol = %e.symbol, error = %err, "ticker not updated");
-        }
-        Ok(())
+        Ok(Some((at, tick)))
     }
 
     /// Writes every stock's ticker from the recorded trades. Run it now and

@@ -101,6 +101,45 @@ async fn repeated_events_change_nothing_and_a_gap_halts() {
     assert!(matches!(e.deliver().await, Err(HandlerError::Halt(_))));
 }
 
+/// The consume loop hands Settlement every waiting message at once. A
+/// batch applies whole or not at all, and ends where single events would.
+#[tokio::test]
+async fn a_batch_applies_whole_or_not_at_all() {
+    let e = env().await;
+    let buyer = e.user("buyer", 100_000, &[]).await;
+    let seller = e.user("seller", 0, &[("ACME", 50)]).await;
+    e.place(&seller, "s", "ACME", Sell, 1000, 50).await.unwrap();
+    e.place(&buyer, "b1", "ACME", Buy, 1000, 20).await.unwrap();
+    e.place(&buyer, "b2", "ACME", Buy, 1000, 30).await.unwrap();
+    let events = e.run_risk().await;
+    assert_eq!(events.iter().filter_map(trade_of).count(), 2);
+
+    // A gap at the end fails the whole batch: no trade stored or settled.
+    let mut far = events.last().unwrap().clone();
+    far.seq += 2;
+    e.redeliver(far);
+    assert!(matches!(e.deliver_batch().await, Err(HandlerError::Halt(_))));
+    assert_eq!(e.settle_transactions().await, 0);
+    assert_eq!(e.settlement.pending().await.unwrap(), 0);
+
+    // Without it, the batch settles both trades.
+    e.queue_clear_last();
+    e.deliver_batch().await.unwrap();
+    assert_eq!(e.settle_transactions().await, 2);
+    assert_eq!(e.settled_messages().await.len(), 2);
+    assert_eq!(e.settlement.pending().await.unwrap(), 0);
+
+    // The same batch again, with each event twice, changes nothing.
+    for ev in e.events.lock().unwrap().clone() {
+        e.redeliver(ev.clone());
+        e.redeliver(ev);
+    }
+    e.deliver_batch().await.unwrap();
+    assert_eq!(e.settle_transactions().await, 2);
+    assert!(e.settled_messages().await.is_empty());
+    e.audit().await;
+}
+
 #[tokio::test]
 async fn settlement_waits_out_an_accounts_outage_and_catches_up() {
     let e = env().await;

@@ -17,6 +17,8 @@
 //! );
 //! ```
 
+use std::collections::HashMap;
+
 use sqlx::PgConnection;
 
 #[cfg(feature = "kafka")]
@@ -47,7 +49,76 @@ pub fn decide(last_applied: u64, seq: u64) -> Decision {
 /// [`Decision::Apply`] records it as applied. The progress row stays locked
 /// until the transaction ends, so two copies cannot apply the same event.
 pub async fn claim(conn: &mut PgConnection, symbol: &str, seq: u64) -> sqlx::Result<Decision> {
-    let seq_i = i64::try_from(seq).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+    let mut claims = Claims::default();
+    let decision = claims.claim(conn, symbol, seq).await?;
+    claims.save(conn).await?;
+    Ok(decision)
+}
+
+/// [`claim`] for many events in one transaction: each stock's progress row
+/// is read and locked once, the decisions are made in memory, and
+/// [`Claims::save`] writes each changed row once before the commit.
+#[derive(Debug, Default)]
+pub struct Claims {
+    /// symbol → (last seq stored in the table, last seq applied so far).
+    last: HashMap<String, (u64, u64)>,
+}
+
+impl Claims {
+    pub async fn claim(
+        &mut self,
+        conn: &mut PgConnection,
+        symbol: &str,
+        seq: u64,
+    ) -> sqlx::Result<Decision> {
+        let entry = match self.last.get_mut(symbol) {
+            Some(entry) => entry,
+            None => {
+                let stored = load(conn, symbol).await?;
+                self.last
+                    .entry(symbol.to_owned())
+                    .or_insert((stored, stored))
+            }
+        };
+        let decision = decide(entry.1, seq);
+        match decision {
+            Decision::Apply => entry.1 = seq,
+            Decision::Repeat => {}
+            // Spec alert "Event sequence gap": must stay 0.
+            // The log line (from the caller's halt) names the stock.
+            Decision::Gap { .. } => metrics::counter!("consumer_seq_gaps_total").increment(1),
+        }
+        Ok(decision)
+    }
+
+    /// Records `seq` as applied whatever came before it: for a consumer
+    /// that logs a gap and carries on instead of halting.
+    pub fn skip_to(&mut self, symbol: &str, seq: u64) {
+        if let Some(entry) = self.last.get_mut(symbol) {
+            entry.1 = entry.1.max(seq);
+        }
+    }
+
+    /// Writes the new progress, in the same transaction as the effects.
+    pub async fn save(self, conn: &mut PgConnection) -> sqlx::Result<()> {
+        for (symbol, (stored, applied)) in self.last {
+            if applied == stored {
+                continue;
+            }
+            let applied = i64::try_from(applied).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+            sqlx::query("UPDATE consumer_progress SET last_seq = $2 WHERE symbol = $1")
+                .bind(&symbol)
+                .bind(applied)
+                .execute(&mut *conn)
+                .await?;
+        }
+        Ok(())
+    }
+}
+
+/// The stored progress for `symbol`, its row created if missing and locked
+/// until the transaction ends.
+async fn load(conn: &mut PgConnection, symbol: &str) -> sqlx::Result<u64> {
     sqlx::query(
         "INSERT INTO consumer_progress (symbol, last_seq) VALUES ($1, 0) ON CONFLICT DO NOTHING",
     )
@@ -59,20 +130,7 @@ pub async fn claim(conn: &mut PgConnection, symbol: &str, seq: u64) -> sqlx::Res
             .bind(symbol)
             .fetch_one(&mut *conn)
             .await?;
-    let decision = decide(u64::try_from(last).unwrap_or(0), seq);
-    if let Decision::Gap { .. } = decision {
-        // Spec alert "Event sequence gap": must stay 0.
-        // The log line (from the caller's halt) names the stock.
-        metrics::counter!("consumer_seq_gaps_total").increment(1);
-    }
-    if decision == Decision::Apply {
-        sqlx::query("UPDATE consumer_progress SET last_seq = $2 WHERE symbol = $1")
-            .bind(symbol)
-            .bind(seq_i)
-            .execute(&mut *conn)
-            .await?;
-    }
-    Ok(decision)
+    Ok(u64::try_from(last).unwrap_or(0))
 }
 
 /// What a message handler reports back to the consume loop.

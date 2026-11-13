@@ -2,15 +2,20 @@
 
 The whole system under the spec's load-test workload: every service, Redpanda,
 PostgreSQL, Redis and the observability stack, on one laptop. Recorded
-2026-11-12. The matching engine on its own is in [matcher.md](matcher.md).
+2026-11-12; [section 4](#4-batched-consumer-writes) was added on 2026-11-13,
+after the consumers began applying events in batches. The matching engine
+on its own is in [matcher.md](matcher.md).
 
-**In short:** on this laptop the system sustains about **50 orders/s** with
-every latency target met, accepts up to **300 orders/s** for a minute, and
-recovers a matcher with **138,000 commands to replay in 6.7 s**. It is far
-from the spec's 2,000 orders/s. The disk is the first limit (about 10
-orders/s with PostgreSQL on it); with the disk out of the way, the services
-that consume `matching.events`, each applying one event per PostgreSQL
-transaction, are the next.
+**In short:** on this laptop the system met every latency target at **50
+orders/s**, accepts up to **300 orders/s** for a minute, and recovers a
+matcher with **138,000 commands to replay in 6.7 s**. It is far from the
+spec's 2,000 orders/s. The disk is the first limit (about 10 orders/s with
+PostgreSQL on it). With the disk out of the way, the services consuming
+`matching.events` were the next: one PostgreSQL transaction per event held
+them to about 50 orders/s. They now apply events in batches and **keep up
+with 200 orders/s for 30 minutes** (0 events behind at the end, against
+540,000–770,000 before). The limit is now Accounts, whose 16 database
+connections are all busy at 250–300 orders/s.
 
 ## Results against the targets
 
@@ -18,14 +23,14 @@ transaction, are the next.
 |---|---|---|---|
 | Matcher throughput | ≥ 500,000 commands/s, one core | 2.59 M/s ([matcher.md](matcher.md)) | Pass |
 | Matcher processing time | p99 ≤ 10 µs | 1.1 µs | Pass |
-| Sustained order rate | 2,000 orders/s for 30 min | 200/s offered for 30 min: 98.9% accepted, but consumers fell behind (below). Sustainable: about 50/s | **Miss** |
+| Sustained order rate | 2,000 orders/s for 30 min | 200/s for 30 min: 99.1% accepted, 0 client timeouts, consumers caught up ([section 4](#4-batched-consumer-writes)). Before batching: 98.9%, consumers 540,000+ events behind | **Miss** |
 | Order accepted response | p99 ≤ 50 ms | 46 ms at 50/s; 67 ms at 100/s; 264 ms at 200/s sustained | Pass at 50/s only |
 | Order to fill notification | p99 ≤ 100 ms | 47 ms at 50/s; 79 ms at 100/s | Pass up to 100/s |
 | Trade to final balance | p99 ≤ 250 ms | 92 ms at 50/s; 180 ms at 100/s | Pass up to 100/s |
 | Trade to public price update | p99 ≤ 100 ms with 5,000 clients | 26 ms at 50/s, 75 ms at 100/s, **with 20 clients** | Pass, but not at the spec's client count |
 | Matcher recovery | ≤ 10 s with 100,000 commands to replay | 6.7 s with 138,181; 4.2 s with 85,817 | Pass |
 | Memory | No growth trend over 1 hour | 30-minute run only; see [Memory](#memory) | Not shown |
-| Correctness | 0 auditor failures | 0 after all 11 failure tests ([failure-tests.md](../failure-tests.md)); 0 after the sustained run once consumers caught up ([below](#correctness-after-the-sustained-run)) | Pass |
+| Correctness | 0 auditor failures | 0 after all 11 failure tests, run again with batching ([failure-tests.md](../failure-tests.md)); 0 after the sustained run once consumers caught up ([below](#correctness-after-the-sustained-run)) | Pass |
 
 Rates in the sweeps are 60-second runs. "Accepted" is the HTTP response to
 `POST /v1/orders`, measured by the load generator from each order's scheduled
@@ -190,20 +195,92 @@ in-memory data, in an 8 GB VM, and Docker stopped answering until Tempo,
 Loki and Grafana were stopped. Long runs on this machine should keep fewer
 traces (`TRACE_KEEP_PERCENT`).
 
+## 4. Batched consumer writes
+
+Measured 2026-11-13. The spec's tuning step 2: each consumer of
+`matching.events` now applies all the messages waiting for one partition
+(up to 100, `CONSUMER_MAX_BATCH`) in one PostgreSQL transaction, reads
+and locks each stock's sequence row once per batch, and lets the Kafka
+client commit offsets once a second instead of after every message.
+Settlement also marks a batch's settled trades in one transaction, and
+Market Data writes each stock's ticker once per batch. If a batch fails
+for any reason, its messages are handled again one at a time, so retries,
+halts and the sequence check behave exactly as before. Notifications
+still handles one message at a time; only its offset commits changed.
+All 11 failure tests pass with it ([failure-tests.md](../failure-tests.md)).
+
+**The machine was slower that day.** Master's code, run again for
+comparison on the same fast-disk setup, accepted only 31% of orders at
+300/s (100% the day before) and 94.6% at 200/s. So the rows below compare
+the two versions on the same day, not with sections 2 and 3.
+
+| Version | Offered/s | Accepted/s | OK | Accepted p50 | Accepted p99 | Fill notification p99 | Trade to settled p99 | Public trade p99 |
+|---|---|---|---|---|---|---|---|---|
+| master | 100 | 100 | 100% | 24 ms | 180 ms | 313 ms | 470 ms | 152 ms |
+| batched | 100 | 100 | 100% | 21 ms | 136 ms | 207 ms | 231 ms | 51 ms |
+| master | 200 | 189 | 94.6% | 90 ms | 2,003 ms | 2,049 ms | 29.6 s | 294 ms |
+| batched | 200 | 200 | 100% | 46 ms | 543 ms | 3,777 ms | 4,437 ms | 3,455 ms |
+| master | 300 | 93 | 31.1% | 1,601 ms | 2,010 ms | 2,316 ms | 27.1 s | 430 ms |
+| batched | 300 | 52 | 17.4% | 1,488 ms | 2,008 ms | 4,362 ms | 4,233 ms | 2,441 ms |
+
+At 50 orders/s the batched version met the public-trade target (39 ms) but
+not the other p99 targets on that day: accepted 98 ms, fill notification
+206 ms, settled 201 ms.
+
+At 200/s, with batching, settlement is no longer tens of seconds behind
+and every order got an answer. The fill and public-trade p99s of that
+minute come from one stall, during which Risk's consumer fell 422 events
+behind for about 20 s and then caught up. At 300/s both versions fail the
+same way, in the request path rather than the consumers: Risk and Accounts
+both had all 16 database connections in use, and Accounts' `Reserve` took
+58 ms at the median, so orders waited for a connection until the Gateway
+gave up. Turning batching off (`CONSUMER_MAX_BATCH=1`) on the same stack
+gave 32% at 300/s, the same as master.
+
+### Thirty minutes at 200 orders/s, batched
+
+Traces kept: 10% (`TRACE_KEEP_PERCENT=10`), so Tempo could not fill the
+VM's memory as it did in section 3.
+
+| Offered/s | Accepted/s | OK | Accepted p50 | Accepted p99 | Fill notification p50 / p99 | Trade to settled p99 | Public trade p50 / p99 |
+|---|---|---|---|---|---|---|---|
+| 200 | 198 | 99.13% | 40 ms | 1,559 ms | 66 ms / 5.7 s | 10.3 s | 19 ms / 4.8 s |
+
+360,000 orders were offered: 356,860 accepted, 3,140 rejected with 503 and
+**0 timed out** on the client (1,636 before). The rejections fall in 38 of
+the 1,800 seconds, in two clusters about 12 and 29 minutes in; the p99s
+come from those stalls, while the medians stay in tens of milliseconds.
+
+Consumer lag, sampled every 5 minutes: 0 for all four consumers at every
+sample but one (Risk, 4,133 events behind 16 minutes in, back to 0 by the
+next sample). When traffic stopped, Risk was 580 events behind and the
+others 0. Before batching, the same run left them 540,000–770,000 events
+behind. Average batch size at 200/s was 3–5 events: the batches grow only
+when a consumer falls behind, which is when they help.
+
+Memory over the run: every service ended between 14 and 50 MiB except
+Accounts (566 MiB, falling in the second half; Argon2 setup memory). Gateway
+and Risk, which were still growing in section 3, ended at 32 and 30 MiB,
+flat. PostgreSQL (data in memory) and Redpanda (its log) grew, as expected.
+This is still a 30-minute run, not the spec's hour.
+
 ## Where the time goes
 
 1. **The disk.** On this machine PostgreSQL's flushes are the first limit,
    as the spec predicts: about 10 orders/s with full durability.
-2. **One database transaction per consumed event.** With the disk out of the
-   way, the API accepts 300 orders/s, but each consumer of `matching.events`
-   applies events one at a time per partition, each in its own PostgreSQL
-   transaction (sequence claim plus effect), and commits the Kafka offset
-   after every event. During the catch-up PostgreSQL used 2.1 cores and the
-   single-core broker 0.75. This is the spec's tuning step 2, "batch outbox
-   publishing and consumer database writes", and the next thing to change:
-   apply a batch of events per transaction and let Kafka offsets be committed
-   on a timer (the sequence check already makes repeats harmless).
-3. **The shared machine.** Every service, PostgreSQL, the broker, the
+2. **One database transaction per consumed event** (done). Each consumer
+   of `matching.events` applied events one at a time per partition, each in
+   its own PostgreSQL transaction, and committed the Kafka offset after
+   every event; during the catch-up PostgreSQL used 2.1 cores and the
+   single-core broker 0.75. Batching (the spec's tuning step 2,
+   [section 4](#4-batched-consumer-writes)) lets them keep up with 200
+   orders/s.
+3. **Accounts' database connections.** Every order waits for Accounts to
+   reserve funds, and settlements and releases go through the same
+   service. At 250–300 orders/s its 16 connections are all in use and
+   orders queue for one. Next steps: more connections (PostgreSQL has room
+   with the disk out of the way), and fewer statements per reservation.
+4. **The shared machine.** Every service, PostgreSQL, the broker, the
    observability stack and the load generator share 12 hardware threads; the
    generator itself fell up to 3.8 s behind its schedule during the stall.
 

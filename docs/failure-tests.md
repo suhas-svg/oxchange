@@ -60,23 +60,24 @@ Compose project `oxchaos`, with `docker-compose.yml` plus the overlay
 
 ## Results
 
-Full run on 2026-11-12, all 11 in one pass on the final code:
+Full run on 2026-11-13, all 11 in one pass, with the consumers applying
+events in batches ([benchmarks/system.md](benchmarks/system.md#4-batched-consumer-writes)):
 
 Rate 25 orders/s, 100 users, seed 42. PostgreSQL synchronous_commit=off (see tools/chaos/compose.chaos.yml).
 
 | Scenario | Result | Auditor | Orders ok | Must also show |
 |---|---|---|---|---|
-| Engine crash | PASS | pass | 100.0% of 15500 | 20 kills, worst recovery 326 ms |
-| Crash during replay | PASS | pass | 100.0% of 2250 | crashed mid-replay: True; second recovery 157 ms |
+| Engine crash | PASS | pass | 100.0% of 15500 | 20 kills, worst recovery 179 ms |
+| Crash during replay | PASS | pass | 100.0% of 2250 | crashed mid-replay: True; second recovery 145 ms |
 | Corrupted snapshot | PASS | pass | 100.0% of 2500 | skipped the damaged snapshot, recovered from `snapshot-p001-00000000000000007000.snap` |
-| Exact-moment Risk crash | PASS | pass | 84.1% of 2250 | sweeper rejected 116 stale orders |
+| Exact-moment Risk crash | PASS | pass | 83.8% of 2250 | sweeper rejected 73 stale orders |
 | Exact-moment settlement crash | PASS | pass | 100.0% of 2250 | crashed after SettleTrade; one ledger transaction per trade |
-| Lost reservation reply | PASS | pass | 92.5% of 2000 | 149 reservations voided |
+| Lost reservation reply | PASS | pass | 92.5% of 2000 | 150 reservations voided |
 | Slow Accounts | PASS | pass | 81.1% of 2000 | 0 client timeouts; rejects {'limit_ioc_cross SERVICE_UNAVAILABLE': 45, 'limit_rest SERVICE_UNAVAILABLE': 333} |
-| Duplicate events | PASS | pass | 100.0% of 2250 | 51 messages republished |
+| Duplicate events | PASS | pass | 100.0% of 2250 | 49 messages republished |
 | Broker loss | PASS | pass | 100.0% of 2500 | matching.events verified: True |
-| Redis wipe | PASS | pass | 100.0% of 2750 | market order while down: (503, 'SERVICE_UNAVAILABLE'); back after 4.1 s |
-| Everything restarts | PASS | pass | 57.5% of 2750 | all services back in 30.6 s |
+| Redis wipe | PASS | pass | 100.0% of 2750 | market order while down: (503, 'SERVICE_UNAVAILABLE'); back after 2.1 s |
+| Everything restarts | PASS | pass | 67.1% of 2750 | all services back in 30.3 s |
 
 "Orders ok" below 100% is the injected failure doing its job: orders
 rejected with 503 while Accounts is slow or Risk is down, never a timeout.

@@ -17,7 +17,7 @@
 
 mod accounts_api;
 
-use consumer::{Decision, HandlerError};
+use consumer::{Claims, Decision, HandlerError};
 use prost::Message;
 use proto_gen::accounts::v1 as apb;
 use proto_gen::events::v1 as ev;
@@ -84,10 +84,36 @@ impl<A: AccountsApi> Settlement<A> {
     /// Handles one `matching.events` message. Only trades matter here, but
     /// every event advances the seq, so a gap is still noticed.
     pub async fn apply_event(&self, e: &ev::MatchingEvent) -> Result<(), HandlerError> {
+        self.apply_events(std::slice::from_ref(e)).await
+    }
+
+    /// Stores the trades among `events` in one transaction (all or none),
+    /// then settles each one in order.
+    pub async fn apply_events(&self, events: &[ev::MatchingEvent]) -> Result<(), HandlerError> {
         let mut tx = self.pool.begin().await.map_err(db_error)?;
-        let decision = consumer::claim(&mut tx, &e.symbol, e.seq)
-            .await
-            .map_err(db_error)?;
+        let mut claims = Claims::default();
+        let mut trades = Vec::new();
+        for e in events {
+            if let Some(t) = self.store_in(&mut tx, &mut claims, e).await? {
+                trades.push(t);
+            }
+        }
+        claims.save(&mut tx).await.map_err(db_error)?;
+        tx.commit().await.map_err(db_error)?;
+        // Also on a repeat: the first delivery may have crashed before
+        // settling, and the trade is still PENDING.
+        self.settle_all(&trades).await
+    }
+
+    /// Claims one event and stores it if it is a new trade. Returns the
+    /// trade to settle, if it is one.
+    async fn store_in<'e>(
+        &self,
+        tx: &mut sqlx::PgConnection,
+        claims: &mut Claims,
+        e: &'e ev::MatchingEvent,
+    ) -> Result<Option<&'e str>, HandlerError> {
+        let decision = claims.claim(tx, &e.symbol, e.seq).await.map_err(db_error)?;
         if let Decision::Gap { expected, got } = decision {
             return Err(halt(format!(
                 "{}: expected seq {expected}, got {got}; events are missing",
@@ -123,39 +149,60 @@ impl<A: AccountsApi> Settlement<A> {
             .await
             .map_err(db_error)?;
         }
-        tx.commit().await.map_err(db_error)?;
-        // Also on a repeat: the first delivery may have crashed before
-        // settling, and the trade is still PENDING.
-        match trade {
-            Some(t) => self.settle(&t.trade_id).await,
-            None => Ok(()),
-        }
+        Ok(trade.map(|t| t.trade_id.as_str()))
     }
 
     /// Settles one stored trade if it is still PENDING.
     pub async fn settle(&self, trade_id: &str) -> Result<(), HandlerError> {
-        let row: Option<TradeRow> = sqlx::query_as(
-            "SELECT symbol, status, price_cents, quantity, buy_order_id, sell_order_id,
-                    buyer_id, seller_id, trade_id
-             FROM trades WHERE trade_id = $1",
-        )
-        .bind(trade_id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(db_error)?;
-        let Some((symbol, status, price, qty, buy_order, sell_order, buyer, seller, _)) = row
-        else {
-            // Its seq was applied, so the row must exist.
-            return Err(halt(format!("trade {trade_id} was never stored")));
-        };
-        if status == "SETTLED" {
+        self.settle_all(&[trade_id]).await
+    }
+
+    /// Settles stored trades, in order, that are still PENDING: one
+    /// `SettleTrade` call each, then one transaction marks them SETTLED and
+    /// queues their `TradeSettled` messages. If a call fails, the trades
+    /// settled before it are still marked, and the error is returned.
+    async fn settle_all(&self, trade_ids: &[&str]) -> Result<(), HandlerError> {
+        if trade_ids.is_empty() {
             return Ok(());
         }
+        let ids: Vec<String> = trade_ids.iter().map(|&t| t.to_owned()).collect();
+        let rows: Vec<TradeRow> = sqlx::query_as(
+            "SELECT symbol, status, price_cents, quantity, buy_order_id, sell_order_id,
+                    buyer_id, seller_id, trade_id
+             FROM trades WHERE trade_id = ANY($1)",
+        )
+        .bind(&ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db_error)?;
+        let mut done = Vec::with_capacity(trade_ids.len());
+        let mut failed = None;
+        for &trade_id in trade_ids {
+            let Some(row) = rows.iter().find(|r| r.8 == trade_id) else {
+                // Its seq was applied, so the row must exist.
+                failed = Some(halt(format!("trade {trade_id} was never stored")));
+                break;
+            };
+            if row.1 == "SETTLED" || done.iter().any(|r: &&TradeRow| r.8 == trade_id) {
+                continue;
+            }
+            if let Err(e) = self.call_settle(row).await {
+                failed = Some(e);
+                break;
+            }
+            done.push(row);
+        }
+        self.mark_settled(&done).await?;
+        failed.map_or(Ok(()), Err)
+    }
+
+    async fn call_settle(&self, row: &TradeRow) -> Result<(), HandlerError> {
+        let (symbol, _, price, qty, buy_order, sell_order, buyer, seller, trade_id) = row;
         let req = apb::SettleTradeRequest {
-            trade_id: trade_id.to_owned(),
+            trade_id: trade_id.clone(),
             symbol: symbol.clone(),
-            price_cents: price,
-            quantity: qty,
+            price_cents: *price,
+            quantity: *qty,
             buy_order_id: buy_order.to_string(),
             sell_order_id: sell_order.to_string(),
             buyer_id: buyer.to_string(),
@@ -179,25 +226,38 @@ impl<A: AccountsApi> Settlement<A> {
             }
             Err(HandlerError::Retry("crash point after SettleTrade".into()))
         });
+        Ok(())
+    }
 
+    /// Marks trades that Accounts has settled as SETTLED and queues a
+    /// `TradeSettled` for each, in one transaction.
+    async fn mark_settled(&self, rows: &[&TradeRow]) -> Result<(), HandlerError> {
+        if rows.is_empty() {
+            return Ok(());
+        }
         let mut tx = self.pool.begin().await.map_err(db_error)?;
-        // Also returns the spec's "trade to final balance" delay.
-        let settled: Option<(OffsetDateTime, f64)> = sqlx::query_as(
-            "UPDATE trades SET status = 'SETTLED', settled_at = now()
-             WHERE trade_id = $1 AND status = 'PENDING'
-             RETURNING settled_at, extract(epoch FROM clock_timestamp() - executed_at)::float8",
-        )
-        .bind(trade_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(db_error)?;
-        if let Some((at, delay)) = settled {
+        for (symbol, _, price, qty, buy_order, sell_order, buyer, seller, trade_id) in
+            rows.iter().copied()
+        {
+            // Also returns the spec's "trade to final balance" delay.
+            let settled: Option<(OffsetDateTime, f64)> = sqlx::query_as(
+                "UPDATE trades SET status = 'SETTLED', settled_at = now()
+                 WHERE trade_id = $1 AND status = 'PENDING'
+                 RETURNING settled_at, extract(epoch FROM clock_timestamp() - executed_at)::float8",
+            )
+            .bind(trade_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(db_error)?;
+            let Some((at, delay)) = settled else {
+                continue;
+            };
             metrics::histogram!("settlement_seconds").record(delay);
             let msg = ev::TradeSettled {
-                trade_id: trade_id.to_owned(),
-                symbol,
-                price_cents: price,
-                quantity: qty,
+                trade_id: trade_id.clone(),
+                symbol: symbol.clone(),
+                price_cents: *price,
+                quantity: *qty,
                 buy_order_id: buy_order.to_string(),
                 sell_order_id: sell_order.to_string(),
                 buyer_id: buyer.to_string(),

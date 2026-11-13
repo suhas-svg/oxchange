@@ -290,6 +290,21 @@ impl Env {
         }
     }
 
+    /// Delivers Settlement's whole queue as one batch, as the consume loop
+    /// does with the messages already waiting. On an error the queue stays
+    /// as it was.
+    pub async fn deliver_batch(&self) -> Result<(), HandlerError> {
+        let batch: Vec<_> = self.queue.lock().unwrap().iter().cloned().collect();
+        self.settlement.apply_events(&batch).await?;
+        self.queue.lock().unwrap().clear();
+        Ok(())
+    }
+
+    /// Drops the newest event from Settlement's queue.
+    pub fn queue_clear_last(&self) {
+        self.queue.lock().unwrap().pop_back();
+    }
+
     /// Sends an event to Settlement as if it were redelivered.
     pub fn redeliver(&self, e: ev::MatchingEvent) {
         self.queue.lock().unwrap().push_back(e);

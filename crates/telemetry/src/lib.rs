@@ -370,6 +370,16 @@ pub fn follow(span: &tracing::Span, traceparent: Option<&str>) {
     }
 }
 
+/// Links `span` to the remote `traceparent` (when it is valid) without
+/// making it the parent: a span that handles several messages at once
+/// follows the first and links the rest. Call before the span is first
+/// entered.
+pub fn link(span: &tracing::Span, traceparent: Option<&str>) {
+    if let Some(cx) = traceparent.and_then(parse_traceparent) {
+        span.add_link(cx.span().span_context().clone());
+    }
+}
+
 /// Whether a `traceparent` asks for the trace to be recorded.
 pub fn is_sampled(traceparent: &str) -> bool {
     traceparent.len() == 55 && traceparent.ends_with("01")
