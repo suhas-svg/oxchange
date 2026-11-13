@@ -173,12 +173,25 @@ pub(crate) async fn post(
     .await
     .map_err(map_missing_user)?;
 
-    // Lock in ascending ID order: the rule that prevents deadlocks.
+    // Lock in ascending ID order: the rule that prevents deadlocks. The
+    // inner lookup finds each ID through the (owner_id, asset, kind) index:
+    // equality for user accounts, IS NULL for external ones. A join on
+    // `IS NOT DISTINCT FROM` cannot use the index and read every account
+    // on every posting (half of Accounts' database time under load).
     let rows: Vec<(i64, Option<Uuid>, String, String, i64)> = sqlx::query_as(
         "SELECT a.id, a.owner_id, a.asset, a.kind, a.balance
          FROM ledger_accounts a
-         JOIN UNNEST($1::uuid[], $2::text[], $3::text[]) AS k(owner_id, asset, kind)
-           ON a.owner_id IS NOT DISTINCT FROM k.owner_id AND a.asset = k.asset AND a.kind = k.kind
+         WHERE a.id = ANY(ARRAY(
+           SELECT l.id
+           FROM UNNEST($1::uuid[], $2::text[], $3::text[]) AS k(owner_id, asset, kind),
+           LATERAL (
+             SELECT x.id FROM ledger_accounts x
+             WHERE x.owner_id = k.owner_id AND x.asset = k.asset AND x.kind = k.kind
+             UNION ALL
+             SELECT x.id FROM ledger_accounts x
+             WHERE k.owner_id IS NULL AND x.owner_id IS NULL
+               AND x.asset = k.asset AND x.kind = k.kind
+           ) l))
          ORDER BY a.id
          FOR UPDATE OF a",
     )

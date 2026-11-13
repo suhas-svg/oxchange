@@ -13,7 +13,12 @@ name: oxchange
 
 services:
   postgres:
-    command: ["postgres", "-c", "synchronous_commit=off", "-c", "max_wal_size=512MB"]
+    # pg_stat_statements: per-query time, for "check slow queries" (spec,
+    # "Where the time goes", step 1). Enable it per database with
+    # CREATE EXTENSION pg_stat_statements.
+    command: ["postgres", "-c", "synchronous_commit=off", "-c", "max_wal_size=512MB",
+              "-c", "shared_preload_libraries=pg_stat_statements",
+              "-c", "pg_stat_statements.track=all"]
     tmpfs: ["/var/lib/postgresql/data:size=3g"]
     volumes: !override
       - ./deploy/helm/oxchange/files/postgres-init.sh:/docker-entrypoint-initdb.d/init.sh:ro
