@@ -6,7 +6,7 @@
 //! remains, so cancels and settlements can arrive in either order and still
 //! produce the same balance.
 
-use consumer::{Decision, HandlerError};
+use consumer::{Claims, Decision, HandlerError};
 use proto_gen::accounts::v1 as apb;
 use proto_gen::events::v1 as ev;
 use tonic::Code;
@@ -37,11 +37,28 @@ fn order_id(s: &str) -> Result<Uuid, HandlerError> {
 impl<A: AccountsApi> Risk<A> {
     /// Applies one event, exactly once, in one transaction.
     pub async fn apply_event(&self, e: &ev::MatchingEvent) -> Result<(), HandlerError> {
+        self.apply_events(std::slice::from_ref(e)).await
+    }
+
+    /// Applies events in order, exactly once, all in one transaction: all
+    /// of them or none.
+    pub async fn apply_events(&self, events: &[ev::MatchingEvent]) -> Result<(), HandlerError> {
         let mut tx = self.pool.begin().await.map_err(db_error)?;
-        match consumer::claim(&mut tx, &e.symbol, e.seq)
-            .await
-            .map_err(db_error)?
-        {
+        let mut claims = Claims::default();
+        for e in events {
+            self.apply_in(&mut tx, &mut claims, e).await?;
+        }
+        claims.save(&mut tx).await.map_err(db_error)?;
+        tx.commit().await.map_err(db_error)
+    }
+
+    async fn apply_in(
+        &self,
+        tx: &mut sqlx::PgConnection,
+        claims: &mut Claims,
+        e: &ev::MatchingEvent,
+    ) -> Result<(), HandlerError> {
+        match claims.claim(tx, &e.symbol, e.seq).await.map_err(db_error)? {
             Decision::Repeat => return Ok(()),
             Decision::Gap { expected, got } => {
                 return Err(halt(format!(
@@ -131,7 +148,7 @@ impl<A: AccountsApi> Risk<A> {
             | Some(ev::matching_event::Body::BookChanged(_)) => {}
             None => return Err(halt(format!("event {} has no body", e.event_id))),
         }
-        tx.commit().await.map_err(db_error)
+        Ok(())
     }
 
     async fn release(&self, order: Uuid, event_id: &str, amount: i64) -> Result<(), HandlerError> {

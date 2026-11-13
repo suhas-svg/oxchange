@@ -122,15 +122,19 @@ async fn serve() -> Result<(), BoxError> {
     // matching.events consumer.
     let consumer = consumer::kafka::consumer(&brokers, "risk", MATCHING_EVENTS_TOPIC)?;
     let r = risk.clone();
-    tasks.spawn(consumer::kafka::run(
+    tasks.spawn(consumer::kafka::run_batches(
         consumer,
-        move |rec| {
+        consumer::kafka::max_batch_from_env(),
+        move |batch: Vec<consumer::kafka::Record<'_>>| {
             let r = r.clone();
-            let decoded = ev::MatchingEvent::decode(rec.payload);
+            let decoded: Result<Vec<_>, _> = batch
+                .iter()
+                .map(|rec| ev::MatchingEvent::decode(rec.payload))
+                .collect();
             async move {
-                let e = decoded
+                let events = decoded
                     .map_err(|e| consumer::HandlerError::Halt(format!("undecodable event: {e}")))?;
-                r.apply_event(&e).await
+                r.apply_events(&events).await
             }
         },
         stopped(stop_rx.clone()),

@@ -153,7 +153,7 @@ Docker Desktop; details and caveats in the linked pages.
 
 - **All 11 failure tests pass** in one run, with the auditor finding 0
   problems after each: matcher killed 20 times in 10 minutes (worst recovery
-  326 ms), crashes at the exact moment between two writes in Risk and
+  179 ms), crashes at the exact moment between two writes in Risk and
   Settlement, lost and slow replies from Accounts, 1% duplicated Kafka
   messages, a broker killed, Redis wiped, everything killed at once.
   [docs/failure-tests.md](docs/failure-tests.md)
@@ -161,9 +161,11 @@ Docker Desktop; details and caveats in the linked pages.
   [docs/benchmarks/matcher.md](docs/benchmarks/matcher.md)
 - **Whole system:** every latency target met at 50 orders/s (order accepted
   p99 46 ms, fill notification 47 ms, settled 92 ms, public trade 26 ms),
-  with PostgreSQL on a simulated fast disk. The API accepts 300 orders/s,
-  but the services consuming the engine's events, one database transaction
-  per event, fall behind above about 50/s. On this laptop's own disk
+  with PostgreSQL on a simulated fast disk. The API accepts 300 orders/s.
+  The services consuming the engine's events apply them in batches and keep
+  up with 200 orders/s for 30 minutes (one transaction per event held them
+  to about 50/s); Accounts' database connections are the next limit, at
+  250–300/s. On this laptop's own disk
   (about 22 flushes a second) the limit is about 10 orders/s. The spec's
   2,000 orders/s is not reached on this machine.
   [docs/benchmarks/system.md](docs/benchmarks/system.md)

@@ -59,6 +59,65 @@ async fn trades_build_candles_and_the_ticker_and_repeats_change_nothing() {
     assert_eq!(e.ticker.read("ACME").await.unwrap(), Some(tick));
 }
 
+/// The consume loop hands the recorder every waiting message at once: the
+/// result matches one event at a time, across stocks, with repeats and a
+/// gap inside the batch.
+#[tokio::test]
+async fn a_batch_records_the_same_as_single_events() {
+    let single = env().await;
+    let batched = env().await;
+    let events = vec![
+        other("ACME", 1),
+        trade("ACME", 2, T0, 1000, 10),
+        trade("BOLT", 1, T0, 2500, 3),
+        trade("ACME", 2, T0, 1000, 10),
+        trade("ACME", 3, T0 + 20 * SEC, 1010, 5),
+        // ACME 4 and 5 are missing: logged, and recording carries on.
+        trade("ACME", 6, T0 + 70 * SEC, 1005, 2),
+        trade("BOLT", 2, T0 + 5 * SEC, 2490, 4),
+        trade("BOLT", 1, T0, 2500, 3),
+    ];
+    for ev in &events {
+        single.recorder.apply_event(ev).await.unwrap();
+    }
+    batched.recorder.apply_events(&events).await.unwrap();
+
+    for e in [&single, &batched] {
+        assert_eq!(e.count("SELECT count(*) FROM market_trades").await, 5);
+    }
+    let candles = |pool: sqlx::PgPool| async move {
+        sqlx::query_as::<_, (String, i64, i64, i64, i64, i64)>(
+            "SELECT symbol, open_cents, high_cents, low_cents, close_cents, volume
+             FROM candles_1m ORDER BY symbol, bucket_start",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+    };
+    assert_eq!(
+        candles(single.pool.clone()).await,
+        candles(batched.pool.clone()).await
+    );
+    for symbol in ["ACME", "BOLT"] {
+        assert_eq!(
+            single.ticker.read(symbol).await.unwrap(),
+            batched.ticker.read(symbol).await.unwrap(),
+            "{symbol} ticker"
+        );
+    }
+    let progress = |pool: sqlx::PgPool| async move {
+        sqlx::query_as::<_, (String, i64)>(
+            "SELECT symbol, last_seq FROM consumer_progress ORDER BY symbol",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+    };
+    let p = progress(batched.pool.clone()).await;
+    assert_eq!(p, vec![("ACME".into(), 6), ("BOLT".into(), 2)]);
+    assert_eq!(progress(single.pool.clone()).await, p);
+}
+
 /// Spec failure test "Redis wipe": reduced mode, then full recovery.
 #[tokio::test]
 async fn a_redis_wipe_is_refilled_from_the_recorded_trades() {
