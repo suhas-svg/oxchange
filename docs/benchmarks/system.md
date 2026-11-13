@@ -293,8 +293,9 @@ cores). More connections would only queue more work for the same cores.
 250 orders/s gave 96.7% (before the fix), then 74.9% and 100% (after): the
 run-to-run spread on this laptop is wider than anything one query changes.
 At this rate the machine itself is the limit. What would still lower the
-load is fewer statements per order (spec step 4, combining Risk's writes)
-and a machine where PostgreSQL has its own cores (step 3).
+load is a machine where PostgreSQL has its own cores (step 3); fewer
+statements per order (step 4) is discussed under
+[the spec's tuning steps](#the-specs-tuning-steps).
 
 ## 6. One hour at 100 orders/s (memory)
 
@@ -355,11 +356,45 @@ Not yet explained; it is a fixed cost after a burst of logins, not a leak.
    250–300 orders/s Accounts' 16 connections are all in use, but because
    PostgreSQL is short of CPU, not because there are too few connections;
    the one slow query is fixed ([section 5](#5-connection-pools-and-slow-queries)).
-   The whole VM is near its 12 threads at 250/s. Next: fewer statements per
-   order (spec step 4) and PostgreSQL on its own cores (step 3).
+   The whole VM is near its 12 threads at 250/s.
 4. **The shared machine.** Every service, PostgreSQL, the broker, the
    observability stack and the load generator share 12 hardware threads; the
    generator itself fell up to 3.8 s behind its schedule during the stall.
+
+### The spec's tuning steps
+
+| Step | Status |
+|---|---|
+| 1. Pool sizes and slow queries | Done ([section 5](#5-connection-pools-and-slow-queries)): one query fixed; pools are not the limit |
+| 2. Batch outbox publishing and consumer writes | Done ([section 4](#4-batched-consumer-writes)) |
+| 3. PostgreSQL on a fast SSD or its own machine | Simulated: every result above "fast disk" keeps PostgreSQL in memory. Its own machine was not tried |
+| 4. Combine Risk's first and third writes | **Not done**, see below |
+| 5. Split Accounts across databases | **Not done**, see below |
+
+**Step 4 does not fit Risk's failure handling.** The first write saves the
+order as `PENDING_RISK` *before* Risk asks Accounts to reserve the money.
+That row is what makes a crash safe: if Risk dies after the reservation
+(the "Exact-moment Risk crash" failure test), the sweeper finds the stuck
+row and voids the reservation. Saving the order only after Reserve would
+leave a crash with money reserved and no record of the order in Risk. To
+keep the same guarantee, Accounts would need a new call that lists recent
+reservations, and Risk a claim row so its request path and its sweeper
+cannot both win, which is a new recovery path for one commit out of about
+six per order. At most that saves around a tenth of the database work,
+less than this laptop's run-to-run spread (section 5), so it would not
+show in a measurement here either.
+
+**Step 5 would not help on one machine.** Splitting Accounts' data across
+several databases spreads the work across database servers; with every
+database on the same 12 threads, the CPU it would free does not exist.
+It belongs with step 3, on hardware where PostgreSQL has its own cores.
+
+**Where this leaves the target.** The spec says to stop when the target is
+met and to publish the real number otherwise. On this laptop the system
+sustains **200 orders/s for 30 minutes** against a target of 2,000, and the
+limit is the CPU shared by every service and PostgreSQL. The next useful
+measurement is the spec's own fallback: a larger machine, or PostgreSQL on
+a machine of its own.
 
 ## Not measured
 
