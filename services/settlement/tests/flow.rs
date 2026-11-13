@@ -118,7 +118,10 @@ async fn a_batch_applies_whole_or_not_at_all() {
     let mut far = events.last().unwrap().clone();
     far.seq += 2;
     e.redeliver(far);
-    assert!(matches!(e.deliver_batch().await, Err(HandlerError::Halt(_))));
+    assert!(matches!(
+        e.deliver_batch().await,
+        Err(HandlerError::Halt(_))
+    ));
     assert_eq!(e.settle_transactions().await, 0);
     assert_eq!(e.settlement.pending().await.unwrap(), 0);
 
