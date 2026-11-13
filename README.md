@@ -164,8 +164,8 @@ Docker Desktop; details and caveats in the linked pages.
   with PostgreSQL on a simulated fast disk. The API accepts 300 orders/s.
   The services consuming the engine's events apply them in batches and keep
   up with 200 orders/s for 30 minutes (one transaction per event held them
-  to about 50/s); Accounts' database connections are the next limit, at
-  250–300/s. On this laptop's own disk
+  to about 50/s). At 250–300/s the laptop's CPU is the limit. Memory stays
+  flat for an hour at 100 orders/s. On this laptop's own disk
   (about 22 flushes a second) the limit is about 10 orders/s. The spec's
   2,000 orders/s is not reached on this machine.
   [docs/benchmarks/system.md](docs/benchmarks/system.md)
