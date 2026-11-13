@@ -55,7 +55,7 @@ flowchart TB
     G -->|HTTP / WS proxy| MD[Market Data]
     G -->|HTTP / WS proxy| N[Notifications]
     R -->|gRPC Reserve / Release| A
-    R -->|outbox → orders.commands| K[(Kafka / Redpanda)]
+    R -->|outbox to orders.commands| K[(Kafka / Redpanda)]
     K -->|orders.commands, one partition each| M[Matching engine ×4]
     M -->|matching.events| K
     K -->|matching.events| R
@@ -63,7 +63,7 @@ flowchart TB
     K -->|matching.events| MD
     K -->|matching + settlement + accounts events| N
     S -->|gRPC SettleTrade| A
-    S -->|outbox → settlement.events| K
+    S -->|outbox to settlement.events| K
     A --- PA[(Postgres: accounts)]
     R --- PR[(Postgres: risk)]
     S --- PS[(Postgres: settlement)]
